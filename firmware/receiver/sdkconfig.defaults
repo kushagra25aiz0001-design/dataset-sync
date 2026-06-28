@@ -1,0 +1,26 @@
+# sdkconfig.defaults for csi_receiver
+# Delete build/ and sdkconfig to re-apply after editing.
+
+# ── Partition table ──────────────────────────────────────────────────────────
+CONFIG_PARTITION_TABLE_OFFSET=0xa000
+
+# ── Wi-Fi ────────────────────────────────────────────────────────────────────
+# MANDATORY: enables CSI collection in the Espressif Wi-Fi driver.
+CONFIG_ESP_WIFI_CSI_ENABLED=y
+
+# Disable RX AMPDU – aggregation corrupts per-packet CSI timestamps.
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+
+# Large RX ring buffer so we never drop a CSI report.
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=64
+
+# ── FreeRTOS ─────────────────────────────────────────────────────────────────
+# 1 kHz tick → 1 ms resolution (important for accurate timestamps).
+CONFIG_FREERTOS_HZ=1000
+
+# ── Serial / UART ────────────────────────────────────────────────────────────
+# Larger UART TX buffer so CSV rows are never silently dropped.
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

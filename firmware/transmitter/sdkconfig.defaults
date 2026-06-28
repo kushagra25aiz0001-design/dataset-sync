@@ -1,0 +1,25 @@
+# sdkconfig.defaults for csi_transmitter
+# These settings are applied on first build (before menuconfig).
+# Delete build/ and sdkconfig to re-apply after editing this file.
+
+# ── Partition table ──────────────────────────────────────────────────────────
+# Move the partition table to avoid overlap with the bootloader on ESP32.
+CONFIG_PARTITION_TABLE_OFFSET=0xa000
+
+# ── Wi-Fi ────────────────────────────────────────────────────────────────────
+# Large TX buffer so bursts of ESP-NOW frames don't drop.
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=128
+
+# Enable CSI feature in the Wi-Fi driver (MANDATORY for both TX and RX sides).
+CONFIG_ESP_WIFI_CSI_ENABLED=y
+
+# Disable TX AMPDU – AMPDU aggregation can corrupt CSI timing.
+CONFIG_ESP_WIFI_AMPDU_TX_ENABLED=n
+
+# ── FreeRTOS ─────────────────────────────────────────────────────────────────
+# 1 kHz tick rate gives us 1 ms resolution for timing.
+CONFIG_FREERTOS_HZ=1000
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+# Keep INFO level so you can see the startup banner over serial.
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

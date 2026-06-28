@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dataset Sync — Live Dashboard</title>
+    <meta name="description" content="Real-time multi-modal recording dashboard for rPPG signal prediction">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- ─── Header ──────────────────────────────────────────────── -->
+<header id="main-header">
+    <div class="header-left">
+        <div class="logo-icon">📡</div>
+        <div>
+            <h1>Dataset Sync</h1>
+            <p class="subtitle">Live Multi-Modal Dashboard</p>
+        </div>
+    </div>
+    <div class="header-right">
+        <button id="btn-show-setup" class="btn btn-secondary" onclick="showSetupModal()" style="padding: 6px 14px; border-radius: 20px; font-size: 0.72rem; text-transform: uppercase;">⚙️ Setup Devices</button>
+        <div class="status-badges">
+            <span id="badge-cam" class="badge disconnected"><span class="dot"></span> Camera</span>
+            <span id="badge-oxi" class="badge disconnected"><span class="dot"></span> Oximeter</span>
+            <span id="badge-csi" class="badge disconnected"><span class="dot"></span> CSI</span>
+            <span id="badge-emg" class="badge disconnected"><span class="dot"></span> EMG</span>
+            <span id="badge-gsr" class="badge disconnected"><span class="dot"></span> GSR</span>
+        </div>
+        <div id="rec-indicator" class="rec-indicator hidden">
+            <span class="rec-dot"></span> REC
+            <span id="rec-timer">00:00</span>
+        </div>
+    </div>
+</header>
+
+<!-- ─── Main Grid ───────────────────────────────────────────── -->
+<main id="dashboard-grid">
+
+    <!-- Camera Panel -->
+    <section id="panel-camera" class="card">
+        <div class="card-header">
+            <h2>🎥 Live Camera</h2>
+            <span id="cam-info" class="card-meta">—</span>
+        </div>
+        <div class="card-body camera-body">
+            <img id="camera-feed" src="/video_feed" alt="Live Camera Feed" crossorigin="anonymous">
+            <div id="cam-overlay" class="cam-overlay" style="display:none;">
+                <div class="cam-overlay-inner">
+                    <div class="cam-spinner"></div>
+                    <span>Connecting to camera...</span>
+                </div>
+            </div>
+        </div>
+        <div class="card-footer cam-footer">
+            <span id="cam-count">Frames: 0</span>
+            <div id="cam-details" class="cam-details">
+                <span id="cam-resolution" class="cam-detail-badge" title="Resolution">—</span>
+                <span id="cam-fps" class="cam-detail-badge" title="FPS">—</span>
+                <span id="cam-format" class="cam-detail-badge" title="Pixel format">—</span>
+            </div>
+        </div>
+    </section>
+
+    <!-- Oximeter Panel -->
+    <section id="panel-oximeter" class="card">
+        <div class="card-header">
+            <h2>💓 Pulse Oximeter</h2>
+            <span id="oxi-info" class="card-meta">—</span>
+        </div>
+        <div class="card-body">
+            <div class="gauges-row">
+                <!-- SpO2 Gauge -->
+                <div class="gauge-container">
+                    <svg class="gauge-svg" viewBox="0 0 120 120">
+                        <circle class="gauge-bg" cx="60" cy="60" r="52"/>
+                        <circle id="spo2-arc" class="gauge-arc spo2-color" cx="60" cy="60" r="52"/>
+                    </svg>
+                    <div class="gauge-label">
+                        <span id="spo2-val" class="gauge-value">--</span>
+                        <span class="gauge-unit">% SpO₂</span>
+                    </div>
+                </div>
+                <!-- HR Gauge -->
+                <div class="gauge-container">
+                    <svg class="gauge-svg" viewBox="0 0 120 120">
+                        <circle class="gauge-bg" cx="60" cy="60" r="52"/>
+                        <circle id="hr-arc" class="gauge-arc hr-color" cx="60" cy="60" r="52"/>
+                    </svg>
+                    <div class="gauge-label">
+                        <span id="hr-val" class="gauge-value">--</span>
+                        <span class="gauge-unit">BPM</span>
+                    </div>
+                </div>
+            </div>
+            <!-- Waveform (Disabled to save resources) -->
+            <div class="chart-container waveform-chart" style="display: none;">
+                <canvas id="waveform-canvas"></canvas>
+            </div>
+        </div>
+        <div class="card-footer">
+            <span id="oxi-count">Samples: 0</span>
+            <span id="oxi-signal">Signal: —</span>
+        </div>
+    </section>
+
+    <!-- CSI Panel -->
+    <section id="panel-csi" class="card">
+        <div class="card-header">
+            <h2>📶 WiFi CSI</h2>
+            <span id="csi-info" class="card-meta">—</span>
+        </div>
+        <div class="card-body">
+            <div class="chart-container csi-chart">
+                <canvas id="csi-canvas"></canvas>
+            </div>
+            <div class="csi-stats">
+                <div class="stat-box">
+                    <span class="stat-label">RSSI</span>
+                    <span id="csi-rssi" class="stat-value">—</span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">Subcarriers</span>
+                    <span id="csi-subs" class="stat-value">52</span>
+                </div>
+            </div>
+        </div>
+        <div class="card-footer">
+            <span id="csi-count">Packets: 0</span>
+        </div>
+    </section>
+
+    <!-- EMG Panel -->
+    <section id="panel-emg" class="card">
+        <div class="card-header">
+            <h2>⚡ Muscle EMG (250Hz)</h2>
+            <span id="emg-info" class="card-meta">—</span>
+        </div>
+        <div class="card-body">
+            <div class="chart-container emg-chart">
+                <canvas id="emg-canvas"></canvas>
+            </div>
+        </div>
+        <div class="card-footer">
+            <span id="emg-count">Packets: 0</span>
+        </div>
+    </section>
+
+    <!-- GSR Panel -->
+    <section id="panel-gsr" class="card">
+        <div class="card-header">
+            <h2>💧 Skin Conductance (GSR)</h2>
+            <span id="gsr-info" class="card-meta">—</span>
+        </div>
+        <div class="card-body">
+            <div class="gauges-row">
+                <div class="gauge-container">
+                    <svg class="gauge-svg" viewBox="0 0 120 120">
+                        <circle class="gauge-bg" cx="60" cy="60" r="52"/>
+                        <circle id="stress-arc" class="gauge-arc stress-color" cx="60" cy="60" r="52" style="stroke-dasharray: 0, 326.7;"/>
+                    </svg>
+                    <div class="gauge-label">
+                        <span id="stress-val" class="gauge-value">--</span>
+                        <span class="gauge-unit">% Stress</span>
+                    </div>
+                </div>
+                <div class="csi-stats" style="flex-direction: column; justify-content: center;">
+                    <div class="stat-box" style="margin-bottom: 10px;">
+                        <span class="stat-label">Conductance</span>
+                        <span id="gsr-us" class="stat-value">—</span>
+                        <span class="gauge-unit">µS</span>
+                    </div>
+                    <div class="stat-box">
+                        <span class="stat-label">Z-Score</span>
+                        <span id="gsr-zscore" class="stat-value">—</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="card-footer">
+            <span id="gsr-count">Samples: 0</span>
+        </div>
+    </section>
+
+    <!-- Controls Panel -->
+    <section id="panel-controls" class="card controls-card">
+        <div class="card-header">
+            <h2>⚙️ Recording Controls</h2>
+        </div>
+        <div class="card-body controls-body">
+            <div class="control-row">
+                <div class="input-group">
+                    <label for="input-subject">Subject ID</label>
+                    <input type="text" id="input-subject" placeholder="subject_01" value="subject_01">
+                </div>
+                <div class="input-group">
+                    <label for="input-duration">Duration (sec)</label>
+                    <input type="number" id="input-duration" min="5" max="3600" value="60">
+                </div>
+                <div class="input-group">
+                    <label for="select-camera">Camera Source</label>
+                    <select id="select-camera">
+                        <option value="auto">Auto-detect</option>
+                    </select>
+                </div>
+                <div class="input-group">
+                    <label for="select-format">Record Format</label>
+                    <select id="select-format">
+                        <option value="video" selected>📼 Video (MP4)</option>
+                        <option value="frames">🖼️ Frames (JPEG)</option>
+                    </select>
+                </div>
+                <div class="btn-group">
+                    <button id="btn-scan" class="btn btn-scan" onclick="scanDevices()" title="Scan for video devices">
+                        🔍
+                    </button>
+                    <button id="btn-start" class="btn btn-start" onclick="startRecording()">
+                        <span>▶</span> Start Recording
+                    </button>
+                    <button id="btn-stop" class="btn btn-stop" onclick="stopRecording()" disabled>
+                        <span>⏹</span> Stop
+                    </button>
+                </div>
+            </div>
+            <div class="session-info">
+                <span id="session-label">No active session</span>
+                <div class="progress-bar-container" id="progress-container" style="display:none;">
+                    <div class="progress-bar" id="progress-bar"></div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+</main>
+
+<!-- ─── Device Setup Modal ────────────────────────────────────── -->
+<div id="setup-modal" class="modal-overlay">
+    <div class="modal-content glass-panel">
+        <h2>🔌 Device Setup Checklist</h2>
+        <p class="modal-subtitle">Map your connected USB cables to start the dashboard.</p>
+        
+        <div class="setup-grid">
+            <div class="setup-row">
+                <label>🎥 Camera</label>
+                <select id="setup-camera">
+                    <option value="none">None (Disabled)</option>
+                </select>
+            </div>
+            <div class="setup-row">
+                <label>💓 Oximeter</label>
+                <select id="setup-oxi">
+                    <option value="none">None (Disabled)</option>
+                </select>
+            </div>
+            <div class="setup-row">
+                <label>📶 WIFI CSI</label>
+                <select id="setup-csi">
+                    <option value="none">None (Disabled)</option>
+                </select>
+            </div>
+            <div class="setup-row">
+                <label>⚡ Muscle EMG</label>
+                <select id="setup-emg">
+                    <option value="none">None (Disabled)</option>
+                </select>
+            </div>
+            <div class="setup-row">
+                <label>💧 Skin GSR</label>
+                <select id="setup-gsr">
+                    <option value="none">None (Disabled)</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="modal-actions">
+            <button id="btn-close-setup" class="btn btn-secondary hidden" onclick="closeSetupModal()">✕ Close</button>
+            <button id="btn-refresh-ports" class="btn btn-secondary" onclick="fetchSetupPorts()">🔄 Refresh Ports</button>
+            <button id="btn-start-system" class="btn btn-primary" onclick="startSystem()">🚀 Start Dashboard</button>
+        </div>
+    </div>
+</div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

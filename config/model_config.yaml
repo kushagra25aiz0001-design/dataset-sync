@@ -1,0 +1,68 @@
+# ==============================
+# Model Configuration
+# ==============================
+
+data:
+  window_size_seconds: 10                  # Length of each data window
+  stride_seconds: 2                        # Stride between windows
+  target_sample_rate_hz: 30                # Resample all modalities to this rate
+  train_split: 0.70
+  val_split: 0.15
+  test_split: 0.15
+  split_strategy: "subject_wise"           # Ensure no subject leakage
+
+preprocessing:
+  camera:
+    face_detection: "mediapipe"            # mediapipe or haarcascade
+    roi_type: "forehead"                   # forehead, cheeks, full_face
+    color_space: "YCbCr"                   # RGB, YCbCr, Lab
+    bandpass_low_hz: 0.7                   # ~42 BPM
+    bandpass_high_hz: 4.0                  # ~240 BPM
+  csi:
+    subcarrier_selection: "all"            # all, top_k, variance_based
+    top_k_subcarriers: 20
+    bandpass_low_hz: 0.7
+    bandpass_high_hz: 4.0
+    use_phase: true
+    use_amplitude: true
+
+model:
+  camera_rppg:
+    architecture: "cnn_lstm"
+    input_channels: 3                      # RGB or YCbCr channels
+    hidden_size: 128
+    num_lstm_layers: 2
+    dropout: 0.3
+
+  csi_rppg:
+    architecture: "conv1d_bilstm"
+    input_channels: 52                     # Number of subcarriers
+    hidden_size: 128
+    num_lstm_layers: 2
+    dropout: 0.3
+
+  fusion:
+    architecture: "dual_stream_attention"
+    attention_heads: 4
+    fusion_hidden_size: 256
+    dropout: 0.3
+
+training:
+  batch_size: 32
+  num_epochs: 100
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  optimizer: "adamw"
+  scheduler: "cosine_annealing"
+  warmup_epochs: 5
+  early_stopping_patience: 15
+  loss: "neg_pearson_mse"                  # Negative Pearson + MSE combined
+
+evaluation:
+  metrics:
+    - "mae"                                # Mean Absolute Error (BPM)
+    - "rmse"                               # Root Mean Square Error
+    - "pearson_r"                           # Pearson correlation
+    - "bland_altman"                        # Bland-Altman analysis
+  save_predictions: true
+  generate_plots: true

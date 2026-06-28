@@ -1,0 +1,61 @@
+# ==============================
+# Recording Configuration
+# ==============================
+# All 5 sensor modalities + orchestrator settings.
+# Values here override the defaults in src/config_loader.py.
+
+session:
+  output_dir: "data/raw"
+  naming_format: "session_{timestamp}"     # {timestamp} = YYYYMMDD_HHMMSS
+  default_duration_seconds: 60
+
+camera:
+  device_id: 3                             # /dev/video3 (Display capture-UVC03)
+  resolution: [1280, 720]
+  fps: 30
+  codec: "MJPG"                            # MJPG or XVID
+  save_format: "video"                     # "frames" (individual .jpg) or "video" (.mp4)
+  frame_quality: 95                        # JPEG quality (1-100)
+
+oximeter:
+  port: "auto"                             # "auto" or "/dev/ttyUSBx"
+  baud_rate: 9600                          # CMS50E proven at 9600
+  parity: "none"
+  timeout_seconds: 1.0
+  sample_rate_hz: 60                       # Expected packet rate
+
+csi:
+  port: "/dev/ttyUSB1"                     # ESP32 Receiver serial port
+  baud_rate: 115200
+  channel: 6
+  bandwidth: "HT20"
+  packet_rate_hz: 100
+  num_subcarriers: 52
+  timeout_seconds: 1.0
+
+emg:
+  port: "auto"                             # ESP32-S3 + BioAmp EXG Pill
+  baud_rate: 230400
+  channels: 16                             # Number of EMG channels
+  sample_rate_hz: 250                      # Packet rate
+  packet_size_bytes: 36                    # 2 sync + 32 data + 2 pad
+  sync_bytes: [0xC7, 0x7C]               # Binary sync pattern
+  timeout_seconds: 1.0
+
+gsr:
+  port: "auto"                             # ESP32 + Sichiray GSR sensor
+  baud_rate: 115200
+  sample_rate_hz: 10                       # JSON line rate
+  data_format: "json"                      # JSON lines: {"uS":..., "raw":..., ...}
+  timeout_seconds: 1.0
+
+orchestrator:
+  discovery_timeout_s: 30                  # Max time for port discovery
+  whoru_timeout_s: 1.5                     # WHORU handshake timeout
+  max_retries: 5                           # Sensor crash retry limit
+  retry_delay_s: 8                         # Delay between retries
+
+sync:
+  clock_source: "monotonic"                # time.monotonic()
+  pre_recording_countdown_seconds: 3
+  log_interval_seconds: 5                  # Print status every N seconds

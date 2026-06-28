@@ -1,0 +1,69 @@
+# ─── Python ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ─── Virtual environments ───────────────────────────────
+venv/
+env/
+.venv/
+**/h2r_env310/
+
+# ─── IDE / OS ───────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ─── Recorded data (large + privacy-sensitive subject data) ──
+data/
+datasets/train/*.pt
+datasets/val/*.pt
+datasets/test/*.pt
+
+# ─── Model checkpoints ──────────────────────────────────
+models/experiments/*.pth
+models/experiments/*.ckpt
+
+# ─── ESP-IDF firmware build artifacts (regeneratable) ───
+firmware/*/build/
+firmware/**/build/
+sdkconfig.old
+*.bin
+*.elf
+*.map
+
+# ─── Jupyter ────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ─── Logs ───────────────────────────────────────────────
+*.log
+
+# ─── Results (regeneratable) ────────────────────────────
+results/figures/*.png
+results/figures/*.pdf
+
+# ─── Separate sub-project (excluded from this repo) ─────
+GSR/
+
+# ─── Root-level scratch / experimental scripts (superseded by src/) ──
+/cms50e_capture.py
+/cms50e_live.py
+/live_oximetry.py
+/oximeter_test.py
+/sony_rgb_raw_capture.py
+/sony_rgb_raw_capture_v2.py
+/sony_rgb_raw_capture_v4_usb.py
+
+# ─── Root-level screenshots / scratch outputs ───────────
+/desktop_screenshot.png
+/emg_screenshot.png
+/test.jpg
+/live_oximetry_data.csv
+/*.raw
