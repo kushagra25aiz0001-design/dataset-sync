@@ -96,72 +96,82 @@ def build_window_index(splits_json: str, split: str,
     return index, info
 
 
-# ─── PyTorch Dataset (lazy torch/numpy) ──────────────────────────────────────
+# ─── PyTorch Dataset (lazy torch/numpy via a cached factory) ─────────────────
 
-class RPPGWindowDataset:
+_DATASET_CLASS = None  # built once, on first use, to subclass torch's Dataset
+
+
+def _dataset_class():
     """
-    torch.utils.data.Dataset over windowed multi-modal rPPG data for one split.
-    Subclasses torch's Dataset at construction time (lazy import).
+    Define (once) and return the Dataset subclass. torch is imported here, not at
+    module load, so this file imports — and its pure-Python index core is testable
+    — without torch installed. Cleaner and safer than mutating __bases__.
     """
+    global _DATASET_CLASS
+    if _DATASET_CLASS is not None:
+        return _DATASET_CLASS
+    import torch
+    import torch.utils.data as tud
+    import numpy as np
 
-    def __new__(cls, *args, **kwargs):
-        # Bind to torch.utils.data.Dataset only when actually constructed, so the
-        # module can be imported (and its index core tested) without torch.
-        import torch.utils.data as tud
-        if not issubclass(cls, tud.Dataset):
-            cls.__bases__ = (tud.Dataset,)
-        return super().__new__(cls)
+    class _RPPGWindowDataset(tud.Dataset):
+        def __init__(self, splits_json, split='train', inputs=('cam', 'csi'),
+                     target='pleth', processed_root=None,
+                     valid_only=True, normalize=True):
+            self.inputs = tuple(inputs)
+            self.target = target
+            self.normalize = normalize
+            self.index, self.info = build_window_index(
+                splits_json, split, self.inputs, processed_root, valid_only)
+            self.processed_root = self.info['processed_root']
+            self._cache = {}                      # session_id → npz handle
 
-    def __init__(self, splits_json: str, split: str = 'train',
-                 inputs: Sequence[str] = ('cam', 'csi'),
-                 target: str = 'pleth',
-                 processed_root: Optional[str] = None,
-                 valid_only: bool = True, normalize: bool = True):
-        self.inputs = tuple(inputs)
-        self.target = target
-        self.normalize = normalize
-        self.index, self.info = build_window_index(
-            splits_json, split, self.inputs, processed_root, valid_only)
-        self.processed_root = self.info['processed_root']
-        self._cache: Dict[str, dict] = {}      # session_id → npz handle
+        def __len__(self):
+            return len(self.index)
 
-    def __len__(self):
-        return len(self.index)
+        def _npz(self, session_id):
+            if session_id not in self._cache:
+                path = os.path.join(self.processed_root, session_id, 'windows.npz')
+                self._cache[session_id] = np.load(path, mmap_mode='r')
+            return self._cache[session_id]
 
-    def _npz(self, session_id: str):
-        if session_id not in self._cache:
-            import numpy as np
-            path = os.path.join(self.processed_root, session_id, 'windows.npz')
-            self._cache[session_id] = np.load(path, mmap_mode='r')
-        return self._cache[session_id]
+        def __getitem__(self, i):
+            sid, wi = self.index[i]
+            npz = self._npz(sid)
+            inp = {}
+            for m in self.inputs:
+                arr = np.asarray(npz[m][wi], dtype='float32')   # (win_len, ch)
+                if self.normalize:
+                    mu = arr.mean(axis=0, keepdims=True)
+                    sd = arr.std(axis=0, keepdims=True)
+                    arr = (arr - mu) / (sd + 1e-6)
+                inp[m] = torch.from_numpy(arr)
+            item = {'inputs': inp,
+                    'hr': torch.tensor(float(npz['hr'][wi])),
+                    'spo2': torch.tensor(float(npz['spo2'][wi])),
+                    'meta': {'session': sid, 'index': int(wi)}}
+            if self.target == 'pleth' and 'pleth' in npz:
+                y = np.asarray(npz['pleth'][wi], dtype='float32')
+                if self.normalize:
+                    y = (y - y.mean()) / (y.std() + 1e-6)
+                item['pleth'] = torch.from_numpy(y)
+            elif self.target in ('hr', 'spo2'):
+                item['target'] = item[self.target]
+            return item
 
-    def __getitem__(self, i: int):
-        import numpy as np
-        import torch
-        sid, wi = self.index[i]
-        npz = self._npz(sid)
+    _DATASET_CLASS = _RPPGWindowDataset
+    return _DATASET_CLASS
 
-        inp = {}
-        for m in self.inputs:
-            arr = np.asarray(npz[m][wi], dtype='float32')   # (win_len, ch)
-            if self.normalize:
-                mu = arr.mean(axis=0, keepdims=True)
-                sd = arr.std(axis=0, keepdims=True)
-                arr = (arr - mu) / (sd + 1e-6)
-            inp[m] = torch.from_numpy(arr)
 
-        item = {'inputs': inp,
-                'hr': torch.tensor(float(npz['hr'][wi])),
-                'spo2': torch.tensor(float(npz['spo2'][wi])),
-                'meta': {'session': sid, 'index': int(wi)}}
-        if self.target == 'pleth' and 'pleth' in npz:
-            y = np.asarray(npz['pleth'][wi], dtype='float32')
-            if self.normalize:
-                y = (y - y.mean()) / (y.std() + 1e-6)
-            item['pleth'] = torch.from_numpy(y)
-        elif self.target in ('hr', 'spo2'):
-            item['target'] = item[self.target]
-        return item
+def RPPGWindowDataset(splits_json: str, split: str = 'train',
+                      inputs: Sequence[str] = ('cam', 'csi'),
+                      target: str = 'pleth',
+                      processed_root: Optional[str] = None,
+                      valid_only: bool = True, normalize: bool = True):
+    """Construct the torch Dataset for a split (factory over a lazily-built class)."""
+    return _dataset_class()(splits_json, split=split, inputs=inputs, target=target,
+                            processed_root=processed_root, valid_only=valid_only,
+                            normalize=normalize)
 
 
 def _collate(batch):

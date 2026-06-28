@@ -144,11 +144,18 @@ class CSIHandler:
                 local_pkts += 1
                 self.registry.set_counter('csi', local_pkts)
 
-                # Parse amplitudes for visualization (with dynamic auto-healing interpolation for any null subcarriers)
+                # Parse amplitudes for visualization (with dynamic auto-healing interpolation for any null subcarriers).
+                # Amplitudes are the trailing n_carriers (col 3) columns, so the
+                # start index is len(parts) - n_carriers — robust to HT20/HT40 and
+                # correct (the old hard-coded 6 dropped the first 2 subcarriers).
                 parts = line.split(',')
-                if len(parts) > 6:
+                if len(parts) > 4:
                     try:
-                        raw_amps = [abs(float(x)) for x in parts[6:]]
+                        n_carriers = int(float(parts[3]))
+                        amp_start = len(parts) - n_carriers
+                        if amp_start < 4:
+                            amp_start = 4
+                        raw_amps = [abs(float(x)) for x in parts[amp_start:]]
                         if len(raw_amps) >= 52:
                             amps = raw_amps[:52]
                             

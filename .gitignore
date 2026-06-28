@@ -26,6 +26,7 @@ data/
 datasets/train/*.pt
 datasets/val/*.pt
 datasets/test/*.pt
+datasets/splits.json          # regeneratable by src/dataset/splitter.py
 
 # ─── Model checkpoints ──────────────────────────────────
 models/experiments/*.pth

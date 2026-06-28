@@ -41,11 +41,15 @@ import math
 import os
 from typing import Dict, List, Optional, Tuple
 
-# ─── CSI raw-line layout (matches the production dashboard handler) ──────────
+# ─── CSI raw-line layout ─────────────────────────────────────────────────────
+# Line: timestamp_ms, seq, rssi, n_carriers, amp0, amp1, ... amp[n_carriers-1]
+# The amplitudes are the LAST n_carriers columns, so the start index is derived
+# as (len(fields) - n_carriers). This is robust to HT20 (64) vs HT40 (128) and
+# fixes the previous hard-coded offset of 6, which dropped the first 2 subcarriers.
 CSI_DEVICE_TS_COL = 0     # ESP32 tick (ms)
 CSI_RSSI_COL = 2
-CSI_AMP_START = 6         # amplitude subcarriers begin here in the raw line
-CSI_MAX_SUBCARRIERS = 52  # keep the first 52 (matches handler's [:52])
+CSI_NCARRIERS_COL = 3
+CSI_MAX_SUBCARRIERS = 52  # keep the first 52 subcarriers
 
 
 # ─── Pure-stdlib numeric helpers ────────────────────────────────────────────
@@ -207,14 +211,19 @@ def _load_csi(session_dir: str):
             except ValueError:
                 continue
             fields = row[1].split(',')
-            if len(fields) <= CSI_AMP_START:
+            if len(fields) <= CSI_NCARRIERS_COL:
                 continue
             try:
                 d = float(fields[CSI_DEVICE_TS_COL])
                 r = float(fields[CSI_RSSI_COL])
+                n_carriers = int(float(fields[CSI_NCARRIERS_COL]))
             except (ValueError, IndexError):
                 continue
-            raw = fields[CSI_AMP_START:CSI_AMP_START + CSI_MAX_SUBCARRIERS]
+            # Amplitudes are the trailing n_carriers columns.
+            amp_start = len(fields) - n_carriers
+            if amp_start < CSI_NCARRIERS_COL + 1 or n_carriers <= 0:
+                continue
+            raw = fields[amp_start:amp_start + CSI_MAX_SUBCARRIERS]
             vec = []
             for x in raw:
                 try:

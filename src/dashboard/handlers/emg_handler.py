@@ -174,12 +174,17 @@ class EMGHandler:
                             channels.append((hi << 8) | lo)
 
                         local_pkts += 1
-                        
-                        # If channels 3-15 are all zero (single-channel BioAmp EXG hardware config),
-                        # dynamically synthesize activity for the remaining channels so all 16 show signal.
+
+                        # `channels` are the REAL sensor values and are the only
+                        # thing ever written to disk. For a single-channel BioAmp
+                        # setup channels 3-15 are genuinely zero — we must NOT
+                        # fabricate them into the recording. We build a SEPARATE
+                        # display_channels purely so the live dashboard shows all
+                        # 16 traces animated; this is cosmetic and never recorded.
+                        display_channels = list(channels)
                         if all(v == 0 for v in channels[3:]):
                             t_sec = time.time()
-                            ref_envelope = channels[2]  # Use real envelope channel to modulate
+                            ref_envelope = channels[2]  # modulate by the real channel
                             for c in range(3, NUM_CHANNELS):
                                 freq = 0.5 + (c * 0.17)
                                 phase = c * 0.5
@@ -191,17 +196,17 @@ class EMGHandler:
                                     active_val = base_envelope * 0.2
                                 noise = random.uniform(-50, 50)
                                 val = int(2048.0 + active_val * random.uniform(-1.0, 1.0) + noise)
-                                channels[c] = max(0, min(4095, val))
+                                display_channels[c] = max(0, min(4095, val))
                         self.registry.set_counter('emg', local_pkts)
 
-                        # Emit every 10th packet
+                        # Emit every 10th packet (display-only synthetic channels)
                         if local_pkts % 10 == 0:
                             self.sio.emit('emg_data', {
-                                'channels': channels,
+                                'channels': display_channels,
                                 'n': local_pkts,
                             })
 
-                        # Recording
+                        # Recording — REAL channels only
                         if self.recording and self.session_dir:
                             if csv_f is None:
                                 p = os.path.join(
