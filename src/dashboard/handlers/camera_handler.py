@@ -503,7 +503,10 @@ class CameraHandler:
                         'w', newline='',
                     )
                     csv_w = csv.writer(csv_f)
-                    csv_w.writerow(['frame_idx', 'timestamp_s', 'filename'])
+                    # is_real: 1 = genuinely captured frame at a measured timestamp;
+                    # 0 = FRC-inserted duplicate with a synthetic timestamp. rPPG must
+                    # use only is_real==1 rows (duplicates carry no true capture time).
+                    csv_w.writerow(['frame_idx', 'timestamp_s', 'filename', 'is_real'])
                     local_frames = 0
                     last_written_idx = -1
                     last_frame = None
@@ -531,7 +534,7 @@ class CameraHandler:
                     
                     if last_written_idx == -1:
                         video_writer.write(frame)
-                        csv_w.writerow([0, f'{timestamp:.4f}', 'recording_frame_0'])
+                        csv_w.writerow([0, f'{timestamp:.4f}', 'recording_frame_0', 1])
                         last_written_idx = 0
                     else:
                         # Fill gaps (duplicate last frame if there was any capture lag)
@@ -542,15 +545,17 @@ class CameraHandler:
                                 last_written_idx + 1,
                                 f'{duplicate_ts:.4f}',
                                 f'recording_frame_{last_written_idx + 1}',
+                                0,  # FRC duplicate — synthetic timestamp
                             ])
                             last_written_idx += 1
-                        
+
                         # Write current frame
                         video_writer.write(frame)
                         csv_w.writerow([
                             target_idx,
                             f'{timestamp:.4f}',
                             f'recording_frame_{target_idx}',
+                            1,
                         ])
                         last_written_idx = target_idx
                     
@@ -564,7 +569,7 @@ class CameraHandler:
                         os.path.join(cam_dir, fn), frame,
                         [cv2.IMWRITE_JPEG_QUALITY, 95],
                     )
-                    csv_w.writerow([local_frames, f'{timestamp:.4f}', fn])
+                    csv_w.writerow([local_frames, f'{timestamp:.4f}', fn, 1])
                     local_frames += 1
                     self.registry.set_counter('camera', local_frames)
         finally:

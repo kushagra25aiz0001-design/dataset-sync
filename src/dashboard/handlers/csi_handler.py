@@ -125,7 +125,9 @@ class CSIHandler:
         reader_thread = threading.Thread(target=reader_thread_fn, daemon=True, name="csi-serial-drainer")
         reader_thread.start()
 
-        csv_f = None
+        csv_f = None       # raw ESP32 stream (device clock)
+        ts_f = None        # PC-clock anchor: csi_timestamped.csv
+        ts_w = None
         local_pkts = 0
         csv_flush_counter = 0
 
@@ -201,21 +203,36 @@ class CSIHandler:
                         'n': local_pkts,
                     })
 
-                # Recording
+                # Recording. csi_log.csv keeps the raw ESP32 stream (device clock);
+                # csi_timestamped.csv pairs each line with a PC monotonic timestamp so
+                # the device clock can be fit to the shared PC clock post-hoc
+                # (pc_t = a*device_ms + b), which is the only way to align CSI to the
+                # other sensors. The ESP32 tick alone drifts and resets on power-cycle.
                 if self.recording and self.session_dir:
                     if csv_f is None:
-                        p = os.path.join(
-                            self.session_dir, 'csi', 'csi_log.csv',
-                        )
-                        csv_f = open(p, 'a', buffering=1)  # append + line-buffered
+                        csi_dir = os.path.join(self.session_dir, 'csi')
+                        csv_f = open(os.path.join(csi_dir, 'csi_log.csv'),
+                                     'a', buffering=1)
+                        ts_f = open(os.path.join(csi_dir, 'csi_timestamped.csv'),
+                                    'a', newline='', buffering=1)
+                        ts_w = csv.writer(ts_f)
+                        if ts_f.tell() == 0:
+                            ts_w.writerow(['pc_timestamp_s', 'raw_line'])
+                    pc_t = time.monotonic() - self.rec_start
                     csv_f.write(line + '\n')
+                    ts_w.writerow([f'{pc_t:.4f}', line])
                     csv_flush_counter += 1
                     if csv_flush_counter >= 100:
                         csv_f.flush()
+                        ts_f.flush()
                         csv_flush_counter = 0
                 elif csv_f is not None:
                     csv_f.close()
                     csv_f = None
+                    if ts_f is not None:
+                        ts_f.close()
+                        ts_f = None
+                        ts_w = None
                     csv_flush_counter = 0
 
         except Exception as e:
@@ -231,6 +248,8 @@ class CSIHandler:
             ser.close()
             if csv_f:
                 csv_f.close()
+            if ts_f:
+                ts_f.close()
             self.registry.set_state('csi', SensorState.DISCONNECTED)
 
     def stop(self):

@@ -90,6 +90,55 @@ def _count_data_rows(csv_path: str) -> int:
     return n
 
 
+def _scan_gaps(csv_path, ts_col, nominal_dt, is_real_col=None, max_listed=20):
+    """
+    Stream a CSV and find timestamp gaps — intervals far larger than the nominal
+    sampling period (a dropout/disconnect). O(1) memory. Returns a dict:
+        {count, max_gap_s, total_gap_s, gaps: [{at_s, gap_s}, ...]}.
+    `ts_col` is the timestamp column index (seconds); `is_real_col`, if given,
+    restricts to rows whose value in that column is '1' (camera real frames).
+    """
+    threshold = max(0.5, 5.0 * nominal_dt)
+    prev = None
+    count = 0
+    max_gap = 0.0
+    total_gap = 0.0
+    gaps = []
+    if not os.path.exists(csv_path):
+        return {'count': 0, 'max_gap_s': 0.0, 'total_gap_s': 0.0, 'gaps': []}
+    try:
+        with open(csv_path, 'r', errors='replace') as fh:
+            for line in fh:
+                s = line.lstrip()
+                if not s or not s[0].isdigit():
+                    continue
+                parts = s.rstrip('\n').split(',')
+                if is_real_col is not None:
+                    if len(parts) <= is_real_col or parts[is_real_col].strip() != '1':
+                        continue
+                if len(parts) <= ts_col:
+                    continue
+                try:
+                    t = float(parts[ts_col])
+                except ValueError:
+                    continue
+                if prev is not None:
+                    gap = t - prev
+                    if gap > threshold:
+                        count += 1
+                        total_gap += gap
+                        if gap > max_gap:
+                            max_gap = gap
+                        if len(gaps) < max_listed:
+                            gaps.append({'at_s': round(prev, 3),
+                                         'gap_s': round(gap, 3)})
+                prev = t
+    except OSError:
+        pass
+    return {'count': count, 'max_gap_s': round(max_gap, 3),
+            'total_gap_s': round(total_gap, 3), 'gaps': gaps}
+
+
 def _check_disk_space(path: str, min_gb: float = 10.0):
     """Return (free_gb, is_ok). is_ok=False when free space drops below min_gb."""
     usage = shutil.disk_usage(path)
@@ -388,10 +437,36 @@ class DeviceManager:
                     status, reason = 'red', 'video file missing or empty'
 
             rate = round(rows / duration, 1) if duration > 0 else 0.0
+
+            # Gap detection on the shared PC clock. CSI is checked via
+            # csi_timestamped.csv (PC anchor), not the raw device-clock log.
+            # Camera counts only real frames (is_real==1), skipping FRC fills.
+            gap_info = {'count': 0, 'max_gap_s': 0.0, 'total_gap_s': 0.0, 'gaps': []}
+            if rows > 1 and duration > 0:
+                nominal_dt = duration / rows
+                if name == 'camera':
+                    gap_info = _scan_gaps(path, ts_col=1, nominal_dt=nominal_dt,
+                                          is_real_col=3)
+                elif name == 'csi':
+                    csi_ts = os.path.join(self.session_dir, 'csi',
+                                          'csi_timestamped.csv')
+                    gap_info = _scan_gaps(csi_ts, ts_col=0, nominal_dt=nominal_dt)
+                else:
+                    gap_info = _scan_gaps(path, ts_col=0, nominal_dt=nominal_dt)
+
+            if gap_info['count'] > 0 and status == 'green':
+                status = 'yellow'
+                reason = (f"{gap_info['count']} gap(s), "
+                          f"max {gap_info['max_gap_s']}s — possible dropout")
+
             report['sensors'][name] = {
                 'status': status, 'reason': reason,
                 'rows_on_disk': rows, 'captured': seen,
                 'effective_hz': rate,
+                'gaps': gap_info['count'],
+                'max_gap_s': gap_info['max_gap_s'],
+                'total_gap_s': gap_info['total_gap_s'],
+                'gap_detail': gap_info['gaps'],
             }
             if rank[status] > rank[worst]:
                 worst = status
@@ -512,9 +587,12 @@ class DeviceManager:
 
         for handler in [self.camera, self.oximeter, self.csi,
                         self.emg, self.gsr]:
-            handler.recording = True
+            # Set the timestamp origin and output dir BEFORE flipping `recording`
+            # on, so a handler thread can never observe recording==True while
+            # rec_start is still None (which would compute monotonic() - None).
             handler.session_dir = self.session_dir
             handler.rec_start = self.rec_start
+            handler.recording = True
 
         meta = {
             'session_id': self.session_id,

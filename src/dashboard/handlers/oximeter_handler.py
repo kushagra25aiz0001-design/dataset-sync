@@ -348,14 +348,18 @@ class OximeterHandler:
                     sig = pkt.get('signal_str', 0)
                     spo2 = pkt['spo2']
                     hr = pkt['hr']
+                    ppg = pkt.get('ppg', 0)
                     searching = pkt.get('searching', False)
 
-                    # Continuous 60 Hz CSV logging (Write even if searching/no finger to prevent empty files)
+                    # Continuous 60 Hz CSV logging (write even if searching/no finger
+                    # to prevent empty files). The pleth waveform is always recorded —
+                    # it is the instantaneous ground-truth pulse signal for rPPG and is
+                    # valid even when the device's averaged HR/SpO2 are still settling.
                     if self.recording and self.session_dir:
                         if searching or sig == 0:
-                            self._csv_write(0, 0, 0)
+                            self._csv_write(0, 0, 0, ppg)
                         else:
-                            self._csv_write(spo2, hr, sig)
+                            self._csv_write(spo2, hr, sig, ppg)
                     elif self._csv_f is not None:
                         self._close_csv()
 
@@ -393,7 +397,7 @@ class OximeterHandler:
                     return
                 time.sleep(0.1)
 
-    def _csv_write(self, spo2, pulse, sig):
+    def _csv_write(self, spo2, pulse, sig, ppg=0):
         """Writes samples to log file."""
         if self._csv_f is None:
             p = os.path.join(self.session_dir, 'oximeter', 'oximeter_log.csv')
@@ -402,11 +406,11 @@ class OximeterHandler:
             self._csv_w = csv.writer(self._csv_f)
             if is_new:
                 self._csv_w.writerow([
-                    'timestamp_s', 'spo2', 'heart_rate', 'signal_strength',
+                    'timestamp_s', 'spo2', 'heart_rate', 'signal_strength', 'pleth',
                 ])
             self._csv_flush_counter = 0
         t = time.monotonic() - self.rec_start
-        self._csv_w.writerow([f'{t:.4f}', spo2, pulse, sig])
+        self._csv_w.writerow([f'{t:.4f}', spo2, pulse, sig, ppg])
         self._csv_flush_counter += 1
         if self._csv_flush_counter >= 10:
             self._csv_f.flush()
