@@ -244,6 +244,7 @@ class WindowBuilder:
             'window_len': win_len,
             'n_windows': len(slices),
             'n_valid': n_valid,
+            'valid': out_valid,          # per-window 0/1 flags (loader indexes these)
             'inputs': {g: {'channels': gc, 'n_channels': len(gc)}
                        for g, gc in groups.items()},
             'targets': {
