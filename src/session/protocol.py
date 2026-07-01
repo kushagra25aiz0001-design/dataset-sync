@@ -18,6 +18,10 @@ from src.session.tasks import (
     Task, ConsentTask, QuestionnaireTask, BreathingTask, BodyScanTask,
     SitStandTask,
 )
+from src.session.tier_b import (
+    ArithmeticTask, VerbalFluencyTask, PictureDescriptionTask,
+    SAMRatingTask, TLXRatingTask,
+)
 
 
 # ─── Default Tier-C protocol ─────────────────────────────────────────────────
@@ -57,6 +61,41 @@ def default_tier_c_protocol(short: bool = False) -> List[Task]:
     ]
 
 
+def default_tier_b_protocol(short: bool = False) -> List[Task]:
+    """
+    A Tier-B (speech / boundary-timed) session: mental arithmetic + workload
+    rating, verbal fluency, and picture description + SAM rating. Needs the
+    recorder-owned audio stream (run with audio=True).
+    """
+    if short:
+        return [
+            ConsentTask(),
+            ArithmeticTask(start=100, step=7, duration_s=4),
+            TLXRatingTask('arithmetic'),
+            VerbalFluencyTask('animals', duration_s=3),
+            PictureDescriptionTask('pic_demo', duration_s=3),
+            SAMRatingTask('pic_demo'),
+        ]
+    return [
+        ConsentTask(),
+        ArithmeticTask(start=1000, step=7, duration_s=120),
+        TLXRatingTask('arithmetic'),
+        VerbalFluencyTask('animals', duration_s=60),
+        VerbalFluencyTask('fruits', duration_s=60),
+        PictureDescriptionTask('cookie_theft', duration_s=90),
+        SAMRatingTask('cookie_theft'),
+    ]
+
+
+def build_protocol(tier: str, short: bool = False) -> List[Task]:
+    """tier: 'c' | 'b' | 'cb' (Tier-C then Tier-B)."""
+    if tier == 'c':
+        return default_tier_c_protocol(short)
+    if tier == 'b':
+        return default_tier_b_protocol(short)
+    return default_tier_c_protocol(short) + default_tier_b_protocol(short)[1:]
+
+
 # ─── Console UI helpers (hardware run) ───────────────────────────────────────
 
 def _console_event(kind: str, info: dict):
@@ -87,8 +126,12 @@ def _console_responder(prompt: str, **kw):
 
 
 def main():
-    p = argparse.ArgumentParser(description='Run a Tier-C recording session.')
+    p = argparse.ArgumentParser(description='Run a recording session protocol.')
     p.add_argument('--subject', required=True)
+    p.add_argument('--tier', choices=['c', 'b', 'cb'], default='c',
+                   help="c=Tier-C, b=Tier-B (speech), cb=both")
+    p.add_argument('--audio', action='store_true',
+                   help='Capture recorder-owned audio (required for Tier-B speech)')
     p.add_argument('--short', action='store_true', help='Quick smoke-test durations')
     p.add_argument('--warmup', type=float, default=5.0,
                    help='Seconds to let sensors connect before recording')
@@ -116,9 +159,11 @@ def main():
         flag = '✅' if s.get('ok') else '❌'
         print(f'  {flag} {name:>9}: {s.get("state")}')
 
-    tasks = default_tier_c_protocol(short=args.short)
+    tasks = build_protocol(args.tier, short=args.short)
+    audio = args.audio or args.tier in ('b', 'cb')
     runner = SessionRunner(bridge, tasks, subject=args.subject,
-                           on_event=_console_event, responder=_console_responder)
+                           on_event=_console_event, responder=_console_responder,
+                           audio=audio)
     try:
         result = runner.run()
     except KeyboardInterrupt:

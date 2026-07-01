@@ -87,7 +87,7 @@ class SessionRunner:
                  on_event: Optional[Callable[[str, dict], None]] = None,
                  responder: Optional[Callable[..., object]] = None,
                  stop_event: Optional[threading.Event] = None,
-                 duration_margin_s: int = 15):
+                 duration_margin_s: int = 15, audio: bool = False):
         self.bridge = bridge
         self.tasks = tasks
         self.subject = subject
@@ -96,6 +96,7 @@ class SessionRunner:
         self.responder = responder
         self.stop_event = stop_event or threading.Event()
         self.margin = duration_margin_s
+        self.audio = audio
 
     def total_duration(self) -> int:
         planned = sum(getattr(t, 'planned_duration_s', 0.0) for t in self.tasks)
@@ -109,7 +110,8 @@ class SessionRunner:
             self.on_event(kind, info)
 
     def run(self) -> dict:
-        info = self.bridge.start(self.subject, self.total_duration())
+        info = self.bridge.start(self.subject, self.total_duration(),
+                                 audio=self.audio)
         if not info.get('ok'):
             self._emit('recorder_refused', info=info)
             return {'ok': False, 'reason': 'recorder_refused',

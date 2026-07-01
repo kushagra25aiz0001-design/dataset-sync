@@ -22,6 +22,7 @@ All task-boundary/stimulus events go through `mark()` or its taxonomy wrappers,
 which delegate to `SyncMarkerLog` (writes markers.csv on the master clock).
 """
 
+import os
 import time
 from typing import Optional
 
@@ -32,16 +33,19 @@ class RecorderBridge:
     def __init__(self, recorder):
         self.recorder = recorder
         self.markers: Optional[SyncMarkerLog] = None
+        self.audio = None
         self.recording = False
         self.session_id: Optional[str] = None
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
-    def start(self, subject: str, duration: int) -> dict:
+    def start(self, subject: str, duration: int, audio: bool = False,
+              audio_kwargs: Optional[dict] = None) -> dict:
         """
         Start recording and open the marker log on the recorder's master clock.
-        Returns {session_id, t0_monotonic} so the caller can relate its own
-        timing to the master clock if needed.
+        If audio=True, also start the recorder-owned microphone stream anchored to
+        the same clock (Tier-B speech tasks need it). Returns
+        {session_id, t0_monotonic, ok}.
         """
         if self.recording:
             raise RuntimeError('already recording')
@@ -54,11 +58,29 @@ class RecorderBridge:
         self.recording = True
         self.session_id = sid
         self.markers.session_start(subject=subject, duration=duration,
-                                   session_id=sid)
+                                   session_id=sid, audio=bool(audio))
+
+        if audio:
+            try:
+                from src.recorder.audio_recorder import AudioRecorder
+                self.audio = AudioRecorder(
+                    os.path.join(self.recorder.session_dir, 'audio'), t0,
+                    **(audio_kwargs or {}))
+                self.audio.start()
+                self.markers.mark('audio_start', source='backend')
+            except Exception as e:  # missing sounddevice / no mic — degrade, don't crash
+                self.markers.mark('audio_unavailable', error=str(e)[:160])
+                self.audio = None
         return {'session_id': sid, 't0_monotonic': t0, 'ok': True}
 
     def stop(self) -> dict:
-        """Mark session_end, close the marker log, and stop the recorder."""
+        """Stop audio, mark session_end, close the marker log, stop the recorder."""
+        if self.audio is not None:
+            try:
+                self.audio.stop()
+            except Exception:
+                pass
+            self.audio = None
         if self.markers is not None:
             self.markers.session_end()
             self.markers.close()
