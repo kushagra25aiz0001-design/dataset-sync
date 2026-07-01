@@ -186,9 +186,12 @@ class HeadlessDaemon:
 
         for handler in [self.camera, self.oximeter, self.csi,
                         self.emg, self.gsr]:
-            handler.recording = True
+            # Set the timestamp origin and output dir BEFORE flipping `recording`
+            # on, so a handler thread can never observe recording==True while
+            # rec_start is still None (would compute monotonic() - None).
             handler.session_dir = self.session_dir
             handler.rec_start = self.rec_start
+            handler.recording = True
 
         # Save metadata
         meta = {
