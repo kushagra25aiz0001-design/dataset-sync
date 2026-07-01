@@ -241,6 +241,90 @@ def _load_csi(session_dir: str):
     return pc_times, dev_ms, amps, rssi
 
 
+# ─── Protocol markers → step-label columns ───────────────────────────────────
+
+def _load_markers(session_dir: str):
+    """Load markers.csv → sorted [(t_master_s, label), ...]. Markers share the
+    recorder's master clock (monotonic - rec_start), i.e. the same axis as every
+    modality timestamp, so they fold directly onto the grid. [] if absent."""
+    path = os.path.join(session_dir, 'markers.csv')
+    if not os.path.exists(path):
+        return []
+    out = []
+    with open(path, newline='', errors='replace') as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        if not header or 't_master_s' not in header or 'label' not in header:
+            return []
+        ti, li = header.index('t_master_s'), header.index('label')
+        for row in reader:
+            if len(row) <= max(ti, li):
+                continue
+            try:
+                out.append((float(row[ti]), row[li]))
+            except ValueError:
+                continue
+    out.sort(key=lambda m: m[0])
+    return out
+
+
+def _fold_markers(grid, markers):
+    """
+    Turn discrete markers into per-grid-tick *held* label columns:
+      label_block   — id of the currently-open block (block_start/end spans)
+      label_stim    — id of the active stimulus (stim_onset/offset spans)
+      label_cue     — most recent cue since the current block started
+      label_posture — most recent posture state within the current block
+    Point events (response/rating/flash/…) don't alter held state. O(grid+markers).
+    """
+    block_stack, stim, cue, posture = [], '', '', ''
+    out = {'label_block': [], 'label_stim': [], 'label_cue': [], 'label_posture': []}
+    j, n = 0, len(markers)
+    for g in grid:
+        while j < n and markers[j][0] <= g:
+            lbl = markers[j][1]
+            j += 1
+            if lbl.startswith('block_start:'):
+                block_stack.append(lbl.split(':', 1)[1])
+                cue, posture = '', ''          # a fresh block clears transient state
+            elif lbl.startswith('block_end:'):
+                bid = lbl.split(':', 1)[1]
+                for k in range(len(block_stack) - 1, -1, -1):
+                    if block_stack[k] == bid:
+                        del block_stack[k]
+                        break
+                cue, posture = '', ''
+            elif lbl.startswith('stim_onset:'):
+                stim = lbl.split(':', 1)[1]
+            elif lbl.startswith('stim_offset:'):
+                if stim == lbl.split(':', 1)[1]:
+                    stim = ''
+            elif lbl.startswith('cue:'):
+                cue = lbl.split(':', 1)[1]
+            elif lbl.startswith('posture:'):
+                posture = lbl.split(':', 1)[1]
+        out['label_block'].append(block_stack[-1] if block_stack else '')
+        out['label_stim'].append(stim)
+        out['label_cue'].append(cue)
+        out['label_posture'].append(posture)
+    return out
+
+
+def _marker_summary(markers):
+    labels = [l for _, l in markers]
+    def ids(prefix):
+        return sorted({l.split(':', 1)[1] for l in labels if l.startswith(prefix)})
+    return {
+        'n_markers': len(markers),
+        'blocks': ids('block_start:'),
+        'cues': ids('cue:'),
+        'stimuli': ids('stim_onset:'),
+        'n_responses': sum(1 for l in labels if l.startswith('response:')),
+        'n_ratings': sum(1 for l in labels if l.startswith('rating:')),
+        'n_flash': sum(1 for l in labels if l.startswith('flash:')),
+    }
+
+
 # ─── Synchronizer ───────────────────────────────────────────────────────────
 
 class SessionSynchronizer:
@@ -357,6 +441,13 @@ class SessionSynchronizer:
             csi_report = {'n_packets': len(pc_times), 'n_subcarriers': len(amp_cols),
                           'clock_fit': fit}
 
+        # ── Protocol markers → held task/cue/posture/stimulus label columns ──
+        markers = _load_markers(self.session_dir)
+        marker_report = None
+        if markers:
+            columns.update(_fold_markers(grid, markers))
+            marker_report = _marker_summary(markers)
+
         # ── Write outputs ──
         out_dir = os.path.join(self.out_root, self.session_id)
         os.makedirs(out_dir, exist_ok=True)
@@ -381,6 +472,7 @@ class SessionSynchronizer:
             'modalities': modalities,
             'camera': camera_report,
             'csi': csi_report,
+            'markers': marker_report,
             'outputs': {'aligned_csv': csv_path, 'aligned_npz': npz_written},
             'warnings': warnings,
         }

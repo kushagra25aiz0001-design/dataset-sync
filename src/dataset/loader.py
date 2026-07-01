@@ -146,10 +146,12 @@ def _dataset_class():
                     sd = arr.std(axis=0, keepdims=True)
                     arr = (arr - mu) / (sd + 1e-6)
                 inp[m] = torch.from_numpy(arr)
+            labels = {k[len('label_'):]: str(npz[k][wi])
+                      for k in npz.files if k.startswith('label_')}
             item = {'inputs': inp,
                     'hr': torch.tensor(float(npz['hr'][wi])),
                     'spo2': torch.tensor(float(npz['spo2'][wi])),
-                    'meta': {'session': sid, 'index': int(wi)}}
+                    'meta': {'session': sid, 'index': int(wi), 'labels': labels}}
             if self.target == 'pleth' and 'pleth' in npz:
                 y = np.asarray(npz['pleth'][wi], dtype='float32')
                 if self.normalize:

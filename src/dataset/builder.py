@@ -39,8 +39,12 @@ from typing import Dict, List, Optional, Tuple
 
 # ─── CSV loading (pure stdlib) ───────────────────────────────────────────────
 
-def _load_columns(path: str) -> Optional[Tuple[List[str], Dict[str, List[float]]]]:
-    """Header-driven load → (header, {col: [float]}). Non-numeric/blank → NaN."""
+def _load_columns(path: str) -> Optional[Tuple[List[str], Dict[str, list]]]:
+    """
+    Header-driven load → (header, {col: [...]}). Numeric columns become floats
+    (blank/non-numeric → NaN); columns named ``label_*`` (protocol task/cue/
+    posture/stimulus labels from the synchronizer) are kept as raw strings.
+    """
     if not os.path.exists(path):
         return None
     with open(path, newline='', errors='replace') as f:
@@ -48,12 +52,16 @@ def _load_columns(path: str) -> Optional[Tuple[List[str], Dict[str, List[float]]
         header = next(reader, None)
         if not header:
             return None
-        cols: Dict[str, List[float]] = {h: [] for h in header}
+        is_label = {h: h.startswith('label_') for h in header}
+        cols: Dict[str, list] = {h: [] for h in header}
         for row in reader:
             for i, h in enumerate(header):
-                if i < len(row) and row[i] != '':
+                val = row[i] if i < len(row) else ''
+                if is_label[h]:
+                    cols[h].append(val)
+                elif val != '':
                     try:
-                        cols[h].append(float(row[i]))
+                        cols[h].append(float(val))
                     except ValueError:
                         cols[h].append(math.nan)
                 else:
@@ -67,6 +75,17 @@ def _natural_amp_sort(names: List[str]) -> List[str]:
         digits = ''.join(ch for ch in n if ch.isdigit())
         return int(digits) if digits else 0
     return sorted(names, key=key)
+
+
+def _mode(values) -> str:
+    """Most-common non-empty string in a window (the window's dominant label)."""
+    counts: Dict[str, int] = {}
+    for v in values:
+        if v:
+            counts[v] = counts.get(v, 0) + 1
+    if not counts:
+        return ''
+    return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
 # ─── Window math (pure stdlib) ───────────────────────────────────────────────
@@ -188,6 +207,9 @@ class WindowBuilder:
         stride = int(round(self.stride_s * rate))
         slices = _window_slices(n, win_len, stride)
 
+        # Protocol label columns (from synchronizer marker folding), if present
+        label_cols = [c for c in cols if c.startswith('label_')]
+
         # ── Build windows ──
         out_groups: Dict[str, List[List[List[float]]]] = {g: [] for g in groups}
         out_pleth: List[List[float]] = []
@@ -195,6 +217,7 @@ class WindowBuilder:
         out_spo2: List[float] = []
         out_tstart: List[float] = []
         out_valid: List[int] = []
+        out_labels: Dict[str, List[str]] = {c: [] for c in label_cols}
         n_valid = 0
 
         for (s, e) in slices:
@@ -231,10 +254,12 @@ class WindowBuilder:
             out_spo2.append(spo2_med)
             out_tstart.append(t[s])
             out_valid.append(1 if valid else 0)
+            for c in label_cols:
+                out_labels[c].append(_mode(cols[c][s:e]))  # window's dominant label
             n_valid += int(valid)
 
         npz_path = self._save_npz(out_groups, out_pleth, out_hr, out_spo2,
-                                  out_tstart, out_valid, win_len)
+                                  out_tstart, out_valid, out_labels, win_len)
 
         manifest = {
             'session_id': self.session_id,
@@ -252,11 +277,14 @@ class WindowBuilder:
                 'heart_rate': bool(hr_col),
                 'spo2': bool(spo2_col),
             },
+            'labels': {c: sorted(set(v for v in out_labels[c] if v))
+                       for c in label_cols},
             'arrays': {
                 **{g: [len(slices), win_len, len(gc)] for g, gc in groups.items()},
                 'pleth': [len(slices), win_len],
                 'hr': [len(slices)], 'spo2': [len(slices)],
                 't_start': [len(slices)], 'valid': [len(slices)],
+                **{c: [len(slices)] for c in label_cols},
             },
             'npz': npz_path,
             'warnings': warnings,
@@ -265,7 +293,7 @@ class WindowBuilder:
             json.dump(manifest, f, indent=2)
         return manifest
 
-    def _save_npz(self, out_groups, pleth, hr, spo2, tstart, valid, win_len):
+    def _save_npz(self, out_groups, pleth, hr, spo2, tstart, valid, labels, win_len):
         """Stack and save tensors — only if numpy is available."""
         try:
             import numpy as np
@@ -280,6 +308,8 @@ class WindowBuilder:
         arrays['spo2'] = np.asarray(spo2, dtype='float32')
         arrays['t_start'] = np.asarray(tstart, dtype='float64')
         arrays['valid'] = np.asarray(valid, dtype='int8')
+        for c, vals in labels.items():
+            arrays[c] = np.asarray(vals)          # per-window string labels
         path = os.path.join(self.dir, 'windows.npz')
         np.savez_compressed(path, **arrays)
         return path
