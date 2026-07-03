@@ -30,6 +30,8 @@
             <span id="badge-csi" class="badge disconnected"><span class="dot"></span> CSI</span>
             <span id="badge-emg" class="badge disconnected"><span class="dot"></span> EMG</span>
             <span id="badge-gsr" class="badge disconnected"><span class="dot"></span> GSR</span>
+            <span id="badge-thermal" class="badge disconnected"><span class="dot"></span> Thermal</span>
+            <span id="badge-audio" class="badge disconnected"><span class="dot"></span> Audio</span>
         </div>
         <div id="rec-indicator" class="rec-indicator hidden">
             <span class="rec-dot"></span> REC
@@ -186,6 +188,35 @@
         </div>
     </section>
 
+    <!-- Thermal Panel (status only — NO live preview, keeps CPU/RAM free) -->
+    <section id="panel-thermal" class="card">
+        <div class="card-header">
+            <h2>🌡️ Thermal Camera</h2>
+            <span id="thermal-info" class="card-meta">—</span>
+        </div>
+        <div class="card-body" style="display:flex;align-items:center;justify-content:center;min-height:80px;">
+            <span class="card-meta" style="opacity:0.6;">Live preview off (light mode) — validated by rate</span>
+        </div>
+        <div class="card-footer">
+            <span id="thermal-count">Frames: 0</span>
+            <span id="thermal-rate">— Hz</span>
+        </div>
+    </section>
+
+    <!-- Audio Panel (status only) -->
+    <section id="panel-audio" class="card">
+        <div class="card-header">
+            <h2>🎙️ Audio</h2>
+            <span id="audio-info" class="card-meta">—</span>
+        </div>
+        <div class="card-body" style="display:flex;align-items:center;justify-content:center;min-height:80px;">
+            <span class="card-meta" style="opacity:0.6;">Recorder-owned mic on the master clock</span>
+        </div>
+        <div class="card-footer">
+            <span id="audio-state">Idle</span>
+        </div>
+    </section>
+
     <!-- Controls Panel -->
     <section id="panel-controls" class="card controls-card">
         <div class="card-header">
@@ -272,6 +303,20 @@
                 <label>💧 Skin GSR</label>
                 <select id="setup-gsr">
                     <option value="none">None (Disabled)</option>
+                </select>
+            </div>
+            <div class="setup-row">
+                <label>🌡️ Thermal Cam</label>
+                <select id="setup-thermal">
+                    <option value="none">None (Disabled)</option>
+                    <option value="screen">Screen share (full)</option>
+                </select>
+            </div>
+            <div class="setup-row">
+                <label>🎙️ Audio</label>
+                <select id="setup-audio">
+                    <option value="none">None (Disabled)</option>
+                    <option value="hdmi">Camera audio (HDMI)</option>
                 </select>
             </div>
         </div>

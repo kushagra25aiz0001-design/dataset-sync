@@ -68,3 +68,10 @@ GSR/
 /test.jpg
 /live_oximetry_data.csv
 /*.raw
+
+# ─── Personal ECG exports (contain name/DOB — never publish) ───────────
+ECG_DATA/
+*_ECGPDF.pdf
+
+# ─── Scratch / throwaway verification scripts ───────────
+scratchpad/

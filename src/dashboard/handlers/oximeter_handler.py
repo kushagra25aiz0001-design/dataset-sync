@@ -12,7 +12,7 @@ import os
 import time
 import threading
 import queue as _queue
-from typing import Optional, Tuple
+from typing import Optional
 
 import serial
 import serial.tools.list_ports

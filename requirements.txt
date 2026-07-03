@@ -7,8 +7,17 @@ scipy>=1.11.0
 opencv-python>=4.8.0
 mediapipe>=0.10.0
 
-# Serial (Oximeter - Contec CMS60D)
+# Serial (Oximeter - Contec CMS50E; ESP32 CSI/EMG/GSR)
 pyserial>=3.5
+
+# Audio capture (recorder-owned mic on the master clock) — optional, lazy-imported
+sounddevice>=0.4.6
+
+# ECG over BLE (Polar H10 PMD stream) — optional, lazy-imported
+bleak>=0.21.0
+
+# Thermal screen-share capture (FLIR C5 via screen region) — optional, lazy-imported
+mss>=9.0.0
 
 # Deep Learning
 torch>=2.0.0

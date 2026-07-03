@@ -24,6 +24,32 @@ import time
 from typing import Callable, List, Optional
 
 
+class SessionControls:
+    """Operator controls shared between the console and the runner: abort, pause/
+    resume (holds the task timeline; recording keeps running), and skip (end the
+    current task early). All are thread-safe Events."""
+
+    def __init__(self, stop_event: Optional[threading.Event] = None):
+        self.stop = stop_event or threading.Event()   # abort the whole session
+        self.pause = threading.Event()                 # hold the task timeline
+        self.skip = threading.Event()                  # end the current task
+
+    def abort(self):
+        self.stop.set()
+
+    def request_pause(self):
+        self.pause.set()
+
+    def resume(self):
+        self.pause.clear()
+
+    def request_skip(self):
+        self.skip.set()
+
+    def is_paused(self) -> bool:
+        return self.pause.is_set()
+
+
 class RunContext:
     """The only interface a Task uses to reach the recorder / participant / UI."""
 
@@ -31,11 +57,13 @@ class RunContext:
                  sleep: Callable[[float], None] = time.sleep,
                  stop_event: Optional[threading.Event] = None,
                  on_event: Optional[Callable[[str, dict], None]] = None,
-                 responder: Optional[Callable[..., object]] = None):
+                 responder: Optional[Callable[..., object]] = None,
+                 controls: Optional[SessionControls] = None):
         self.bridge = bridge
         self.session_dir = session_dir
         self._sleep = sleep
-        self.stop_event = stop_event or threading.Event()
+        self.controls = controls or SessionControls(stop_event)
+        self.stop_event = self.controls.stop   # back-compat alias
         self._on_event = on_event
         self._responder = responder
         self._resp_path = (os.path.join(session_dir, 'responses.jsonl')
@@ -43,17 +71,24 @@ class RunContext:
 
     # ── control ──
     def aborted(self) -> bool:
-        return self.stop_event.is_set()
+        return self.controls.stop.is_set()
 
     def wait(self, seconds: float) -> bool:
         """
-        Interruptible wait in <=0.1 s steps. Returns True if it completed, False
-        if aborted partway. Uses the injected sleep so tests run instantly.
+        Interruptible wait in <=0.1 s steps. Returns True if it completed (or was
+        skipped), False if aborted partway. Honors pause (holds without consuming
+        the remaining time) and skip (ends this wait early). Uses the injected
+        sleep so tests run instantly.
         """
         remaining = float(seconds)
         while remaining > 0:
             if self.aborted():
                 return False
+            if self.controls.skip.is_set():
+                return True                    # skip: end this wait; runner clears it
+            if self.controls.pause.is_set():
+                self._sleep(0.1)               # hold, don't consume remaining
+                continue
             step = 0.1 if remaining > 0.1 else remaining
             self._sleep(step)
             remaining -= step
@@ -87,14 +122,17 @@ class SessionRunner:
                  on_event: Optional[Callable[[str, dict], None]] = None,
                  responder: Optional[Callable[..., object]] = None,
                  stop_event: Optional[threading.Event] = None,
-                 duration_margin_s: int = 15, audio: bool = False):
+                 duration_margin_s: int = 15, audio: bool = False,
+                 controls: Optional[SessionControls] = None):
         self.bridge = bridge
         self.tasks = tasks
         self.subject = subject
         self.sleep = sleep
         self.on_event = on_event
         self.responder = responder
-        self.stop_event = stop_event or threading.Event()
+        # One controls object drives abort/pause/skip; `stop_event` stays supported.
+        self.controls = controls or SessionControls(stop_event)
+        self.stop_event = self.controls.stop   # back-compat alias
         self.margin = duration_margin_s
         self.audio = audio
 
@@ -103,7 +141,7 @@ class SessionRunner:
         return int(planned + self.margin)
 
     def abort(self):
-        self.stop_event.set()
+        self.controls.abort()
 
     def _emit(self, kind: str, **info):
         if self.on_event:
@@ -120,27 +158,33 @@ class SessionRunner:
         ctx = RunContext(
             self.bridge,
             session_dir=getattr(self.bridge.recorder, 'session_dir', None),
-            sleep=self.sleep, stop_event=self.stop_event,
+            sleep=self.sleep, controls=self.controls,
             on_event=self.on_event, responder=self.responder,
         )
-        completed, aborted = [], False
+        completed, aborted, skipped = [], False, []
         for task in self.tasks:
-            if self.stop_event.is_set():
+            if self.controls.stop.is_set():
                 aborted = True
                 break
             self._emit('task_start', task=task.name)
+            self.bridge.mark(f'task_start:{task.name}')
             try:
                 task.run(ctx)
             except Exception as e:  # a bad task must not abort the whole session
                 self.bridge.mark('task_error', task=task.name, error=str(e)[:200])
                 self._emit('task_error', task=task.name, error=str(e))
+            if self.controls.skip.is_set():   # operator skipped this task
+                self.controls.skip.clear()
+                self.bridge.mark(f'skip:{task.name}')
+                self._emit('task_skipped', task=task.name)
+                skipped.append(task.name)
             self._emit('task_end', task=task.name)
             completed.append(task.name)
 
-        if self.stop_event.is_set():
+        if self.controls.stop.is_set():
             aborted = True
             self.bridge.abort()
         res = self.bridge.stop()
         return {'ok': True, 'aborted': aborted,
                 'session_id': res.get('session_id') or info.get('session_id'),
-                'completed': completed}
+                'completed': completed, 'skipped': skipped}

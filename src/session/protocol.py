@@ -16,7 +16,7 @@ from typing import List
 
 from src.session.tasks import (
     Task, ConsentTask, QuestionnaireTask, BreathingTask, BodyScanTask,
-    SitStandTask,
+    SitStandTask, BpReadTask,
 )
 from src.session.tier_b import (
     ArithmeticTask, VerbalFluencyTask, PictureDescriptionTask,
@@ -46,6 +46,7 @@ def default_tier_c_protocol(short: bool = False) -> List[Task]:
         return [
             ConsentTask(),
             QuestionnaireTask('pre_state', PANAS_SHORT),
+            BpReadTask('rest'),
             BodyScanTask(duration_s=6),
             BreathingTask(cycles=2, pattern=(1, 1, 1, 1)),
             SitStandTask(transitions=2, hold_s=3),
@@ -54,9 +55,11 @@ def default_tier_c_protocol(short: bool = False) -> List[Task]:
     return [
         ConsentTask(),
         QuestionnaireTask('pre_state', PANAS_SHORT),
+        BpReadTask('rest'),
         BodyScanTask(duration_s=240),
         BreathingTask(cycles=10, pattern=(4, 4, 4, 4), variant='v1'),
         SitStandTask(transitions=4, hold_s=60),
+        BpReadTask('post'),
         QuestionnaireTask('post_state', PANAS_SHORT),
     ]
 
@@ -141,15 +144,27 @@ def main():
     p.add_argument('--csi-port', default='/dev/ttyUSB1')
     p.add_argument('--emg-port', default='auto')
     p.add_argument('--gsr-port', default='auto')
+    p.add_argument('--thermal-source', default='none',
+                   help="Thermal camera V4L2 node or 'auto'; 'none' disables it")
+    p.add_argument('--audio-device', default=None,
+                   help="Audio input index/name, or 'hdmi' for the capture card (a6000)")
+    p.add_argument('--marker-port', type=int, default=None,
+                   help='HTTP marker-ingest port for a separate task app (POST /mark)')
     args = p.parse_args()
 
     from src.recorder.recorder_bridge import RecorderBridge
     from src.session.runner import SessionRunner
 
+    # Audio is needed for speech tiers; the daemon owns the mic stream so the
+    # whole path has one clock owner (the bridge then defers to it).
+    audio = args.audio or args.tier in ('b', 'cb')
+
     bridge, daemon = RecorderBridge.embed_headless_daemon(
         warmup_s=args.warmup,
         camera_source=args.camera_source, oxi_port=args.oxi_port,
         csi_port=args.csi_port, emg_port=args.emg_port, gsr_port=args.gsr_port,
+        thermal_source=args.thermal_source, audio=audio,
+        audio_device=args.audio_device, marker_port=args.marker_port,
     )
 
     # Operator health check before starting
@@ -160,7 +175,6 @@ def main():
         print(f'  {flag} {name:>9}: {s.get("state")}')
 
     tasks = build_protocol(args.tier, short=args.short)
-    audio = args.audio or args.tier in ('b', 'cb')
     runner = SessionRunner(bridge, tasks, subject=args.subject,
                            on_event=_console_event, responder=_console_responder,
                            audio=audio)

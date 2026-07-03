@@ -25,6 +25,32 @@ import time
 import wave
 from typing import Optional
 
+# Name fragments of HDMI capture cards that carry the camera's embedded audio.
+# When the Sony a6000 feeds an HDMI capture card, its audio rides the same stream,
+# so capturing THIS device puts audio on the same hardware clock as the video —
+# the tightest possible A/V sync.
+CAPTURE_CARD_HINTS = ('macrosilicon', 'ms2109', 'ms2130', 'usb video',
+                      'usb3. 0', 'usb3.0', 'cam link', 'camlink', 'elgato',
+                      'avermedia', 'magewell', 'hdmi', 'capture')
+
+
+def list_input_devices():
+    """[(index, name, max_input_channels)] for every input-capable device."""
+    import sounddevice as sd
+    return [(i, d['name'], d['max_input_channels'])
+            for i, d in enumerate(sd.query_devices())
+            if d['max_input_channels'] > 0]
+
+
+def find_capture_card_device(hints=CAPTURE_CARD_HINTS):
+    """Index of the first input device whose name looks like an HDMI capture card
+    (i.e. the a6000's audio-over-HDMI), or None if none match."""
+    import sounddevice as sd
+    for i, d in enumerate(sd.query_devices()):
+        if d['max_input_channels'] > 0 and any(h in d['name'].lower() for h in hints):
+            return i
+    return None
+
 
 class AudioRecorder:
     def __init__(self, out_dir: str, t0: float, samplerate: int = 16000,
@@ -40,9 +66,19 @@ class AudioRecorder:
         self._lock = threading.Lock()
 
     def start(self):
-        """Open the input stream. Raises ImportError if sounddevice is missing."""
+        """Open the input stream. Raises ImportError if sounddevice is missing.
+        `device` may be an index, a name substring, or the sentinel 'hdmi'/'auto-hdmi'
+        to auto-select the HDMI capture card (camera audio-over-HDMI)."""
         import sounddevice as sd                # lazy: audio stack optional
         os.makedirs(self.out_dir, exist_ok=True)
+
+        if isinstance(self.device, str) and self.device.lower() in (
+                'hdmi', 'auto-hdmi', 'capture', 'camera'):
+            found = find_capture_card_device()
+            if found is None:
+                raise RuntimeError('no HDMI capture-card audio input found '
+                                   '(is the a6000 passing audio over HDMI?)')
+            self.device = found
 
         def _cb(indata, frames, time_info, status):
             # Anchor the stream to the master clock at the first callback.
@@ -81,6 +117,7 @@ class AudioRecorder:
             't_start_master_s': self._t_start_master,
             'samplerate': self.samplerate,
             'channels': self.channels,
+            'device': self.device,          # capture-card index → same-clock A/V
             'n_frames': n_frames,
             'duration_s': round(n_frames / self.samplerate, 3) if self.samplerate else 0,
         }
