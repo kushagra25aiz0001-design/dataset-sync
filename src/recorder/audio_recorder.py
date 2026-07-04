@@ -29,9 +29,10 @@ from typing import Optional
 # When the Sony a6000 feeds an HDMI capture card, its audio rides the same stream,
 # so capturing THIS device puts audio on the same hardware clock as the video —
 # the tightest possible A/V sync.
-CAPTURE_CARD_HINTS = ('macrosilicon', 'ms2109', 'ms2130', 'usb video',
-                      'usb3. 0', 'usb3.0', 'cam link', 'camlink', 'elgato',
-                      'avermedia', 'magewell', 'hdmi', 'capture')
+CAPTURE_CARD_HINTS = ('macrosilicon', 'ms210', 'ms2109', 'ms2130', 'ms2131',
+                      'fushicai', 'usb video', 'usb3. 0', 'usb3.0', 'usb2.0',
+                      'cam link', 'camlink', 'elgato', 'avermedia', 'magewell',
+                      'hdmi', 'capture', 'uvc', 'video')
 
 
 def list_input_devices():
@@ -60,6 +61,7 @@ class AudioRecorder:
         self.samplerate = int(samplerate)
         self.channels = int(channels)
         self.device = device
+        self._device_name = None
         self._stream = None
         self._frames = []                       # list of int16 byte chunks
         self._t_start_master: Optional[float] = None
@@ -67,18 +69,33 @@ class AudioRecorder:
 
     def start(self):
         """Open the input stream. Raises ImportError if sounddevice is missing.
-        `device` may be an index, a name substring, or the sentinel 'hdmi'/'auto-hdmi'
-        to auto-select the HDMI capture card (camera audio-over-HDMI)."""
+        `device` may be:
+          - None / 'default' / 'jack' / 'line' / 'mic' → the system DEFAULT input
+            (this is the PC audio jack / line-in — where a DJI receiver or a wired
+            mic plugged into the 3.5 mm jack shows up),
+          - 'hdmi' / 'capture' / 'camera' → auto-select the HDMI capture card,
+          - an integer index or a name substring → that specific device."""
         import sounddevice as sd                # lazy: audio stack optional
         os.makedirs(self.out_dir, exist_ok=True)
 
-        if isinstance(self.device, str) and self.device.lower() in (
-                'hdmi', 'auto-hdmi', 'capture', 'camera'):
-            found = find_capture_card_device()
-            if found is None:
-                raise RuntimeError('no HDMI capture-card audio input found '
-                                   '(is the a6000 passing audio over HDMI?)')
-            self.device = found
+        dev = self.device
+        if isinstance(dev, str):
+            low = dev.strip().lower()
+            if low in ('hdmi', 'auto-hdmi', 'capture', 'camera'):
+                found = find_capture_card_device()
+                if found is None:
+                    devs = '; '.join(f'[{i}] {n}' for i, n, _ in list_input_devices())
+                    raise RuntimeError(
+                        'no HDMI capture-card audio input auto-detected. Available '
+                        'inputs: ' + (devs or 'NONE (no audio devices — check '
+                        'PortAudio/mic)') + '. Pass a device index explicitly, or use '
+                        "'default' for the PC audio jack.")
+                self.device = found
+            elif low in ('', 'default', 'auto', 'jack', 'line', 'line-in', 'mic'):
+                self.device = None            # system default input (the audio jack)
+            elif low.isdigit():
+                self.device = int(low)
+            # else: a name substring — sounddevice matches it by name
 
         def _cb(indata, frames, time_info, status):
             # Anchor the stream to the master clock at the first callback.
@@ -86,6 +103,12 @@ class AudioRecorder:
                 self._t_start_master = time.monotonic() - self.t0
             with self._lock:
                 self._frames.append(bytes(indata))
+
+        # Record which input we actually opened (for the metadata / verification).
+        try:
+            self._device_name = sd.query_devices(self.device, 'input')['name']
+        except Exception:
+            self._device_name = str(self.device)
 
         self._stream = sd.RawInputStream(
             samplerate=self.samplerate, channels=self.channels,
@@ -117,7 +140,8 @@ class AudioRecorder:
             't_start_master_s': self._t_start_master,
             'samplerate': self.samplerate,
             'channels': self.channels,
-            'device': self.device,          # capture-card index → same-clock A/V
+            'device': self.device,
+            'device_name': self._device_name,   # which input was actually captured
             'n_frames': n_frames,
             'duration_s': round(n_frames / self.samplerate, 3) if self.samplerate else 0,
         }

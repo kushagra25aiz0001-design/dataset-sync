@@ -83,6 +83,25 @@ def parse_thermal_source(source):
     return ('v4l2', 0)
 
 
+def parse_crop(spec):
+    """Parse a crop spec into {top,bottom,left,right} pixels-from-edge, or None.
+    Accepts a dict, or a 'top,bottom,left,right' string (e.g. '0,20,0,45' to drop
+    the FLIR logo strip + temperature scale bar). Pure function."""
+    if not spec:
+        return None
+    if isinstance(spec, dict):
+        return {k: int(spec.get(k, 0)) for k in ('top', 'bottom', 'left', 'right')}
+    if isinstance(spec, str):
+        parts = spec.split(',')
+        if len(parts) == 4:
+            try:
+                t, b, l, r = (int(x) for x in parts)
+                return {'top': t, 'bottom': b, 'left': l, 'right': r}
+            except ValueError:
+                return None
+    return None
+
+
 # ── frame sources (lazy heavy imports live inside open/read) ──────────────────
 
 class _V4L2Source:
@@ -172,21 +191,48 @@ class ThermalHandler:
     """Live thermal capture loop + decoupled writer thread (bounded queue)."""
 
     def __init__(self, registry: SensorRegistry, sio, source='none',
-                 resolution=(256, 192), fourcc='YUYV'):
+                 resolution=(256, 192), fourcc='YUYV', crop=None):
         self.registry = registry
         self.sio = sio
         self.source = source                 # 'none' | 'auto' | '/dev/videoN' | 'screen[:l,t,w,h]'
         self.resolution = resolution
         self.fourcc = fourcc
+        # Edge crop to strip the FLIR on-screen overlays (temp bar / logo) from the
+        # RECORDED frames; the preview stays full-frame so you can measure them.
+        self.crop = parse_crop(crop)
 
         self._write_queue = queue.Queue(maxsize=120)
         self._stop = threading.Event()
+
+        # MJPEG preview (full frame). Enabled so the operator can watch the live
+        # thermal feed and compare its refresh rate against the other modalities.
+        self._frame = None
+        self._frame_lock = threading.Lock()
+        self._frame_event = threading.Event()
 
         # Recording state (set externally by the daemon, exactly like the camera)
         self.recording = False
         self.session_dir = None
         self.rec_start = None
         self.cam_info = {'device': '—', 'resolution': '—', 'fps': 0}
+        # Live capture fps (updated in monitoring too, so readiness can see the
+        # stream before recording — the recording counter only advances on disk).
+        self.measured_fps = 0.0
+        self._fps_ts = []
+
+    def _crop(self, frame):
+        """Clean-crop a frame (remove the FLIR overlay edges) for recording."""
+        c = self.crop
+        if not c:
+            return frame
+        h, w = frame.shape[:2]
+        top = c['top']
+        left = c['left']
+        bottom = (h - c['bottom']) if c['bottom'] else h
+        right = (w - c['right']) if c['right'] else w
+        if bottom <= top or right <= left:
+            return frame                     # bad crop → don't destroy the frame
+        return frame[top:bottom, left:right]
 
     def _make_source(self):
         kind, spec = parse_thermal_source(self.source)
@@ -202,6 +248,7 @@ class ThermalHandler:
             self.registry.set_state('thermal', SensorState.DISABLED, 'Disabled')
             return
 
+        import cv2                              # for preview JPEG encoding
         self._stop.clear()
         writer = threading.Thread(target=self._writer_loop, daemon=True,
                                   name='thermal-writer')
@@ -253,10 +300,31 @@ class ThermalHandler:
                     continue
                 fails = 0
 
+                # Live fps (monitoring + recording) for the readiness gate.
+                now_t = time.monotonic()
+                self._fps_ts.append(now_t)
+                self._fps_ts = [x for x in self._fps_ts if now_t - x <= 2.0]
+                if len(self._fps_ts) > 3:
+                    self.measured_fps = len(self._fps_ts) / (now_t - self._fps_ts[0])
+                    self.cam_info['fps'] = round(self.measured_fps, 1)
+
+                # Preview from the FULL frame (overlays visible → you can measure the
+                # crop) — thermal is slow (~9 Hz), so encoding every frame is cheap.
+                try:
+                    ok_j, jpg = cv2.imencode('.jpg', frame,
+                                             [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    if ok_j:
+                        with self._frame_lock:
+                            self._frame = jpg.tobytes()
+                        self._frame_event.set()
+                except cv2.error:
+                    pass
+
                 if self.recording and self.session_dir:
                     t = time.monotonic() - self.rec_start
                     try:
-                        self._write_queue.put_nowait((frame, t))
+                        # Recorded frame is clean-cropped (overlays removed).
+                        self._write_queue.put_nowait((self._crop(frame), t))
                     except queue.Full:
                         pass                     # drop rather than block capture
                 time.sleep(0.001)
@@ -317,6 +385,17 @@ class ThermalHandler:
                 csv_f.close()
 
     # ── public API (mirrors CameraHandler) ────────────────────────────────────
+
+    def gen_mjpeg(self):
+        """Event-driven MJPEG generator for the browser thermal preview."""
+        while True:
+            self._frame_event.wait(timeout=0.5)
+            self._frame_event.clear()
+            with self._frame_lock:
+                frame = self._frame
+            if frame:
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
     def stop_recording_files(self):
         try:

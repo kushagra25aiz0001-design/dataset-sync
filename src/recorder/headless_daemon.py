@@ -81,7 +81,7 @@ class HeadlessDaemon:
                  csi_port='/dev/ttyUSB1', csi_baud=115200,
                  emg_port='auto', emg_baud=230400,
                  gsr_port='auto', gsr_baud=115200,
-                 thermal_source='none', thermal_res=(256, 192),
+                 thermal_source='none', thermal_res=(256, 192), thermal_crop=None,
                  audio=False, audio_kwargs=None, audio_device=None,
                  ecg=False, ecg_address=None, marker_port=None):
 
@@ -103,7 +103,8 @@ class HeadlessDaemon:
         self.emg = EMGHandler(self.registry, self.sio, port=emg_port, baud=emg_baud)
         self.gsr = GSRHandler(self.registry, self.sio, port=gsr_port, baud=gsr_baud)
         self.thermal = ThermalHandler(self.registry, self.sio,
-                                      source=thermal_source, resolution=thermal_res)
+                                      source=thermal_source, resolution=thermal_res,
+                                      crop=thermal_crop)
 
         # Audio is a first-class captured modality the daemon owns directly, so the
         # whole recording path has a single authoritative clock owner (brief §1).
@@ -408,8 +409,11 @@ def main():
     parser.add_argument('--gsr-port', type=str, default='auto')
     parser.add_argument('--gsr-baud', type=int, default=115200)
     parser.add_argument('--thermal-source', type=str, default='none',
-                        help="Thermal camera V4L2 node (e.g. /dev/video2, or "
-                             "'auto'); 'none' disables it")
+                        help="Thermal camera V4L2 node (e.g. the FLIR at /dev/video1, "
+                             "or 'auto'); 'none' disables it")
+    parser.add_argument('--thermal-crop', type=str, default=None,
+                        help="Crop FLIR overlays off recorded frames: "
+                             "'top,bottom,left,right' px (e.g. '0,20,0,45')")
     parser.add_argument('--audio', action='store_true',
                         help='Capture recorder-owned audio on the master clock')
     parser.add_argument('--audio-device', default=None,
@@ -462,7 +466,8 @@ def main():
         csi_baud=args.csi_baud, emg_port=args.emg_port,
         emg_baud=args.emg_baud, gsr_port=args.gsr_port,
         gsr_baud=args.gsr_baud,
-        thermal_source=args.thermal_source, audio=args.audio,
+        thermal_source=args.thermal_source, thermal_crop=args.thermal_crop,
+        audio=args.audio,
         audio_device=args.audio_device,
         ecg=args.ecg, ecg_address=args.ecg_address,
         marker_port=args.marker_port,

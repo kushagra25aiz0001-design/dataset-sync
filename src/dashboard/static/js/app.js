@@ -307,7 +307,13 @@ socket.on('device_status', (data) => {
         infoEl = document.getElementById('thermal-info');
     } else if (device === 'audio') {
         badge = document.getElementById('badge-audio');
-        infoEl = document.getElementById('audio-info');
+        // Audio status lives in the camera footer now; show state + reason-on-hover.
+        const audState = document.getElementById('audio-state');
+        if (audState) {
+            audState.textContent = ok ? '🎙️ REC' : '🎙️ FAILED';
+            audState.title = msg || '';
+        }
+        if (!ok && msg) console.warn('[audio] ' + msg);
     }
 
     if (badge) {
@@ -466,6 +472,24 @@ socket.on('rec_stopped', (data) => {
     }, 3000);
 });
 
+// Recording refused by the readiness gate — tell the operator exactly why
+// (previously this was silent, so "nothing happened" on Start).
+socket.on('rec_blocked', (data) => {
+    const sensors = (data && data.readiness && data.readiness.sensors) || {};
+    const notReady = Object.entries(sensors)
+        .filter(([, d]) => d.enabled && !d.ready)
+        .map(([n, d]) => `• ${n}: ${d.reason}`);
+    const label = document.getElementById('session-label');
+    if (label) label.textContent = '⚠ Recording blocked — no sensor producing data yet';
+    const btnStart = document.getElementById('btn-start');
+    const btnStop = document.getElementById('btn-stop');
+    if (btnStart) btnStart.disabled = false;
+    if (btnStop) btnStop.disabled = true;
+    alert('Recording did not start — the readiness gate found no sensor producing '
+        + 'data.\n\n' + (notReady.length ? notReady.join('\n') : 'No sensors enabled.')
+        + '\n\nWait for the sensor badge to turn green, then press Start again.');
+});
+
 socket.on('record_format_changed', (data) => {
     const select = document.getElementById('select-format');
     if (select && data.format) {
@@ -590,7 +614,8 @@ statusInterval = setInterval(async () => {
         if (d.thermal_frames > 0)
             document.getElementById('thermal-count').textContent = `Frames: ${d.thermal_frames}`;
         const audState = document.getElementById('audio-state');
-        if (audState) audState.textContent = d.recording && d.audio_ok ? 'Capturing' : (d.audio_ok ? 'Ready' : 'Idle');
+        if (audState) audState.textContent = (d.recording && d.audio_ok) ? '🎙️ REC'
+                                          : (d.audio_ok ? '🎙️ ready' : '🎙️ off');
 
         // Camera overlay (leave the "preview paused" overlay alone while recording)
         const overlay = document.getElementById('cam-overlay');
@@ -823,8 +848,11 @@ async function fetchSetupPorts() {
         // Audio: keep hardcoded (none, hdmi) + append input devices.
         const auSel = document.getElementById('setup-audio');
         if (auSel) {
-            auSel.innerHTML = '<option value="none">None (Disabled)</option>'
-                            + '<option value="hdmi">Camera audio (HDMI)</option>';
+            // Default = the PC audio jack / system default input, where a DJI
+            // receiver or a wired mic (3.5 mm) shows up. HDMI + explicit devices too.
+            auSel.innerHTML = '<option value="default" selected>Default input — PC audio jack / mic (DJI, wired)</option>'
+                            + '<option value="hdmi">Camera audio (HDMI)</option>'
+                            + '<option value="none">None (Disabled)</option>';
             (data.audio || []).forEach(opt => {
                 const el = document.createElement('option');
                 el.value = opt.device; el.textContent = opt.description;

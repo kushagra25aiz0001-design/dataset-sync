@@ -191,7 +191,8 @@ class DeviceManager:
                  csi_port='/dev/ttyUSB1', csi_baud=115200,
                  emg_port='auto', emg_baud=230400,
                  gsr_port='auto', gsr_baud=115200,
-                 thermal_source='none', audio=False, audio_device=None):
+                 thermal_source='none', thermal_crop=None,
+                 audio=False, audio_device=None):
         self.sio = sio
         self.record_format = record_format
 
@@ -206,8 +207,10 @@ class DeviceManager:
         self.csi = CSIHandler(self.registry, sio, port=csi_port, baud=csi_baud)
         self.emg = EMGHandler(self.registry, sio, port=emg_port, baud=emg_baud)
         self.gsr = GSRHandler(self.registry, sio, port=gsr_port, baud=gsr_baud)
-        # Thermal is a full handler (validated live, no browser preview — light).
-        self.thermal = ThermalHandler(self.registry, sio, source=thermal_source)
+        # Thermal is a full handler with a live preview (so its refresh rate is
+        # visible alongside the others). crop removes the FLIR overlays on record.
+        self.thermal = ThermalHandler(self.registry, sio, source=thermal_source,
+                                      crop=thermal_crop)
 
         # Audio: recorder-owned stream started at record time (no monitoring
         # thread). Validated by device presence, captured on the master clock.
@@ -328,6 +331,16 @@ class DeviceManager:
                 names.append(name)
         return names
 
+    def _live_rate(self, name, counter_hz):
+        """Effective live rate for readiness/QA. The camera & thermal registry
+        counters only advance while recording (they count frames written to disk),
+        so during monitoring use the handler's capture-loop measured_fps instead."""
+        if name == 'camera':
+            return round(getattr(self.camera, 'measured_fps', 0.0) or 0.0, 1)
+        if name == 'thermal':
+            return round(getattr(self.thermal, 'measured_fps', 0.0) or 0.0, 1)
+        return counter_hz
+
     def _qa_loop(self):
         """
         Background thread: once per second, compute each sensor's rolling
@@ -353,6 +366,10 @@ class DeviceManager:
                 delta = max(0, cur - self._qa_last_counts.get(name, cur))
                 self._qa_last_counts[name] = cur
                 hz = round(delta / dt, 1)
+                # Camera/thermal counters only advance while recording, so in
+                # monitoring use their live capture fps — otherwise a camera-only
+                # session looks "not producing data" and the readiness gate blocks it.
+                hz = self._live_rate(name, hz)
                 rates[name] = hz
                 self._sensor_rates[name] = hz
 
@@ -388,7 +405,7 @@ class DeviceManager:
                 result[name] = {'enabled': False, 'ready': False,
                                 'rate_hz': 0.0, 'reason': 'disabled'}
                 continue
-            rate = self._sensor_rates.get(name, 0.0)
+            rate = self._live_rate(name, self._sensor_rates.get(name, 0.0))
             streaming = info.state in (SensorState.CONNECTED, SensorState.STREAMING)
             ready = streaming and rate >= SENSOR_MIN_HZ[name]
             if ready:
@@ -665,9 +682,13 @@ class DeviceManager:
                     os.path.join(self.session_dir, 'audio'), self.rec_start, **kw)
                 self.audio.start()
                 self.registry.set_state('audio', SensorState.STREAMING, 'capturing')
+                self.sio.emit('device_status', {'device': 'audio', 'ok': True,
+                                                 'msg': 'capturing'})
             except Exception as e:
+                reason = str(e)[:200] or e.__class__.__name__
+                self.registry.set_state('audio', SensorState.ERROR, reason)
                 self.sio.emit('device_status', {'device': 'audio', 'ok': False,
-                                                 'msg': f'unavailable: {str(e)[:60]}'})
+                                                 'msg': f'NOT recording: {reason}'})
                 self.audio = None
 
         meta = {
@@ -772,6 +793,9 @@ class DeviceManager:
     def gen_mjpeg(self):
         return self.camera.gen_mjpeg()
 
+    def gen_thermal_mjpeg(self):
+        return self.thermal.gen_mjpeg()
+
     @staticmethod
     def scan_video_devices():
         return CameraHandler.scan_video_devices()
@@ -794,6 +818,13 @@ def _register_routes():
     def video_feed():
         if dm:
             return Response(dm.gen_mjpeg(),
+                            mimetype='multipart/x-mixed-replace; boundary=frame')
+        return '', 204
+
+    @app.route('/thermal_feed')
+    def thermal_feed():
+        if dm:
+            return Response(dm.gen_thermal_mjpeg(),
                             mimetype='multipart/x-mixed-replace; boundary=frame')
         return '', 204
 
@@ -1105,8 +1136,11 @@ def _build_parser():
     parser.add_argument('--gsr-port', type=str, default='auto')
     parser.add_argument('--gsr-baud', type=int, default=115200)
     parser.add_argument('--thermal-source', type=str, default='none',
-                        help="Thermal V4L2 node (/dev/videoN), 'screen[:l,t,w,h]', "
-                             "or 'none'")
+                        help="Thermal V4L2 node (/dev/videoN, e.g. the FLIR at "
+                             "/dev/video1), 'screen[:l,t,w,h]', or 'none'")
+    parser.add_argument('--thermal-crop', type=str, default=None,
+                        help="Crop the FLIR overlays off recorded frames: "
+                             "'top,bottom,left,right' px (e.g. '0,20,0,45')")
     parser.add_argument('--audio', action='store_true',
                         help='Capture recorder-owned audio on the master clock')
     parser.add_argument('--audio-device', type=str, default=None,
@@ -1155,7 +1189,8 @@ def main():
             csi_baud=args.csi_baud, emg_port=args.emg_port,
             emg_baud=args.emg_baud, gsr_port=args.gsr_port,
             gsr_baud=args.gsr_baud,
-            thermal_source=args.thermal_source, audio=args.audio,
+            thermal_source=args.thermal_source, thermal_crop=args.thermal_crop,
+            audio=args.audio,
             audio_device=args.audio_device,
         )
 
@@ -1171,7 +1206,8 @@ def main():
             csi_baud=args.csi_baud, emg_port=args.emg_port,
             emg_baud=args.emg_baud, gsr_port=args.gsr_port,
             gsr_baud=args.gsr_baud,
-            thermal_source=args.thermal_source, audio=args.audio,
+            thermal_source=args.thermal_source, thermal_crop=args.thermal_crop,
+            audio=args.audio,
             audio_device=args.audio_device,
         )
 

@@ -61,6 +61,7 @@
         <div class="card-footer cam-footer">
             <span id="cam-count">Frames: 0</span>
             <div id="cam-details" class="cam-details">
+                <span id="audio-state" class="cam-detail-badge" title="Camera audio (HDMI)">🎙️ off</span>
                 <span id="cam-resolution" class="cam-detail-badge" title="Resolution">—</span>
                 <span id="cam-fps" class="cam-detail-badge" title="FPS">—</span>
                 <span id="cam-format" class="cam-detail-badge" title="Pixel format">—</span>
@@ -188,14 +189,14 @@
         </div>
     </section>
 
-    <!-- Thermal Panel (status only — NO live preview, keeps CPU/RAM free) -->
+    <!-- Thermal Panel (live preview ON — to watch the FLIR refresh rate) -->
     <section id="panel-thermal" class="card">
         <div class="card-header">
             <h2>🌡️ Thermal Camera</h2>
             <span id="thermal-info" class="card-meta">—</span>
         </div>
-        <div class="card-body" style="display:flex;align-items:center;justify-content:center;min-height:80px;">
-            <span class="card-meta" style="opacity:0.6;">Live preview off (light mode) — validated by rate</span>
+        <div class="card-body camera-body">
+            <img id="thermal-feed" src="/thermal_feed" alt="Live Thermal Feed" crossorigin="anonymous">
         </div>
         <div class="card-footer">
             <span id="thermal-count">Frames: 0</span>
@@ -203,19 +204,8 @@
         </div>
     </section>
 
-    <!-- Audio Panel (status only) -->
-    <section id="panel-audio" class="card">
-        <div class="card-header">
-            <h2>🎙️ Audio</h2>
-            <span id="audio-info" class="card-meta">—</span>
-        </div>
-        <div class="card-body" style="display:flex;align-items:center;justify-content:center;min-height:80px;">
-            <span class="card-meta" style="opacity:0.6;">Recorder-owned mic on the master clock</span>
-        </div>
-        <div class="card-footer">
-            <span id="audio-state">Idle</span>
-        </div>
-    </section>
+    <!-- Audio is captured from the camera (HDMI) — shown in the camera panel
+         footer, not a separate card (saves space). -->
 
     <!-- Controls Panel -->
     <section id="panel-controls" class="card controls-card">
@@ -315,8 +305,9 @@
             <div class="setup-row">
                 <label>🎙️ Audio</label>
                 <select id="setup-audio">
-                    <option value="none">None (Disabled)</option>
+                    <option value="default" selected>Default input — PC audio jack / mic (DJI, wired)</option>
                     <option value="hdmi">Camera audio (HDMI)</option>
+                    <option value="none">None (Disabled)</option>
                 </select>
             </div>
         </div>
