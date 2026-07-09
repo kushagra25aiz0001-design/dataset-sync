@@ -1,0 +1,1 @@
+"""Operator tools (standalone diagnostics)."""

@@ -75,3 +75,10 @@ ECG_DATA/
 
 # ─── Scratch / throwaway verification scripts ───────────
 scratchpad/
+
+# ─── Rotated logs ('*.log' alone misses dashboard.log.1) ───────────────
+*.log.*
+
+# ─── Emotion-elicitation stimuli: copyrighted film clips (~106 MB).
+# Never publish these — keep local, distribute out-of-band.
+media/
