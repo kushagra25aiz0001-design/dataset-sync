@@ -90,6 +90,14 @@ SENSOR_DEFINITIONS = {
         "display_name": "Skin GSR",
         "icon": "💧",
     },
+    "thermal": {
+        "display_name": "Thermal Camera",
+        "icon": "🌡️",
+    },
+    "audio": {
+        "display_name": "Audio",
+        "icon": "🎙️",
+    },
 }
 
 ALL_SENSOR_NAMES = list(SENSOR_DEFINITIONS.keys())
@@ -267,9 +275,14 @@ class SensorRegistry:
                     SensorState.CONNECTED, SensorState.STREAMING),
                 "gsr_ok": self._sensors["gsr"].state in (
                     SensorState.CONNECTED, SensorState.STREAMING),
+                "thermal_ok": self._sensors["thermal"].state in (
+                    SensorState.CONNECTED, SensorState.STREAMING),
+                "audio_ok": self._sensors["audio"].state in (
+                    SensorState.CONNECTED, SensorState.STREAMING),
                 "cam_frames": self._sensors["camera"].sample_count,
                 "oxi_samples": self._sensors["oximeter"].sample_count,
                 "csi_packets": self._sensors["csi"].sample_count,
                 "emg_packets": self._sensors["emg"].sample_count,
                 "gsr_samples": self._sensors["gsr"].sample_count,
+                "thermal_frames": self._sensors["thermal"].sample_count,
             }

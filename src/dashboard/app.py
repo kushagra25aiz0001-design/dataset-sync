@@ -22,7 +22,6 @@ import json
 import logging
 import os
 import shutil
-import sys
 import time
 import threading
 from datetime import datetime, timezone, timedelta
@@ -35,6 +34,7 @@ from src.dashboard.handlers.oximeter_handler import OximeterHandler
 from src.dashboard.handlers.csi_handler import CSIHandler
 from src.dashboard.handlers.emg_handler import EMGHandler
 from src.dashboard.handlers.gsr_handler import GSRHandler
+from src.dashboard.handlers.thermal_handler import ThermalHandler
 
 
 # ─── Null SocketIO (headless mode) ────────────────────────────
@@ -71,7 +71,13 @@ SENSOR_MIN_HZ = {
     'csi':      10.0,
     'emg':      50.0,
     'gsr':      3.0,
+    'thermal':  2.0,   # thermal cams run slow (~9-25 Hz); floor only flags dead
 }
+
+# Sensors validated by a live sample rate (counter-based). Audio is validated by
+# device presence instead (it has no monitoring thread — it captures at record
+# time), so it is handled separately in get_readiness().
+_RATE_SENSORS = ['camera', 'oximeter', 'csi', 'emg', 'gsr', 'thermal']
 
 
 def _count_data_rows(csv_path: str) -> int:
@@ -184,7 +190,9 @@ class DeviceManager:
                  record_format='video', oxi_port='auto',
                  csi_port='/dev/ttyUSB1', csi_baud=115200,
                  emg_port='auto', emg_baud=230400,
-                 gsr_port='auto', gsr_baud=115200):
+                 gsr_port='auto', gsr_baud=115200,
+                 thermal_source='none', thermal_crop=None,
+                 audio=False, audio_device=None):
         self.sio = sio
         self.record_format = record_format
 
@@ -199,6 +207,16 @@ class DeviceManager:
         self.csi = CSIHandler(self.registry, sio, port=csi_port, baud=csi_baud)
         self.emg = EMGHandler(self.registry, sio, port=emg_port, baud=emg_baud)
         self.gsr = GSRHandler(self.registry, sio, port=gsr_port, baud=gsr_baud)
+        # Thermal is a full handler with a live preview (so its refresh rate is
+        # visible alongside the others). crop removes the FLIR overlays on record.
+        self.thermal = ThermalHandler(self.registry, sio, source=thermal_source,
+                                      crop=thermal_crop)
+
+        # Audio: recorder-owned stream started at record time (no monitoring
+        # thread). Validated by device presence, captured on the master clock.
+        self.captures_audio = bool(audio)
+        self._audio_device = audio_device
+        self.audio = None
 
         self.monitoring = False
         self.recording = False
@@ -261,6 +279,14 @@ class DeviceManager:
         return self.registry.get_counter('gsr')
 
     @property
+    def thermal_ok(self):
+        return self.registry.is_ok('thermal')
+
+    @property
+    def thermal_frames(self):
+        return self.registry.get_counter('thermal')
+
+    @property
     def cam_info(self):
         return self.camera.cam_info
 
@@ -299,11 +325,21 @@ class DeviceManager:
     def _enabled_sensors(self):
         """Sensor names that the user has NOT disabled (state != DISABLED)."""
         names = []
-        for name in ['camera', 'oximeter', 'csi', 'emg', 'gsr']:
+        for name in _RATE_SENSORS:
             info = self.registry.get_sensor(name)
             if info and info.state != SensorState.DISABLED:
                 names.append(name)
         return names
+
+    def _live_rate(self, name, counter_hz):
+        """Effective live rate for readiness/QA. The camera & thermal registry
+        counters only advance while recording (they count frames written to disk),
+        so during monitoring use the handler's capture-loop measured_fps instead."""
+        if name == 'camera':
+            return round(getattr(self.camera, 'measured_fps', 0.0) or 0.0, 1)
+        if name == 'thermal':
+            return round(getattr(self.thermal, 'measured_fps', 0.0) or 0.0, 1)
+        return counter_hz
 
     def _qa_loop(self):
         """
@@ -313,7 +349,7 @@ class DeviceManager:
         recording (data expected but none arriving).
         """
         self._qa_last_t = time.monotonic()
-        for name in ['camera', 'oximeter', 'csi', 'emg', 'gsr']:
+        for name in _RATE_SENSORS:
             self._qa_last_counts[name] = self.registry.get_counter(name)
 
         while not self._qa_stop.is_set():
@@ -325,11 +361,15 @@ class DeviceManager:
             self._qa_last_t = now
 
             rates, stalled = {}, []
-            for name in ['camera', 'oximeter', 'csi', 'emg', 'gsr']:
+            for name in _RATE_SENSORS:
                 cur = self.registry.get_counter(name)
                 delta = max(0, cur - self._qa_last_counts.get(name, cur))
                 self._qa_last_counts[name] = cur
                 hz = round(delta / dt, 1)
+                # Camera/thermal counters only advance while recording, so in
+                # monitoring use their live capture fps — otherwise a camera-only
+                # session looks "not producing data" and the readiness gate blocks it.
+                hz = self._live_rate(name, hz)
                 rates[name] = hz
                 self._sensor_rates[name] = hz
 
@@ -359,13 +399,13 @@ class DeviceManager:
         """
         result = {}
         any_ready = False
-        for name in ['camera', 'oximeter', 'csi', 'emg', 'gsr']:
+        for name in _RATE_SENSORS:
             info = self.registry.get_sensor(name)
             if info is None or info.state == SensorState.DISABLED:
                 result[name] = {'enabled': False, 'ready': False,
                                 'rate_hz': 0.0, 'reason': 'disabled'}
                 continue
-            rate = self._sensor_rates.get(name, 0.0)
+            rate = self._live_rate(name, self._sensor_rates.get(name, 0.0))
             streaming = info.state in (SensorState.CONNECTED, SensorState.STREAMING)
             ready = streaming and rate >= SENSOR_MIN_HZ[name]
             if ready:
@@ -377,7 +417,40 @@ class DeviceManager:
                 reason = f'no data ({rate:.1f} Hz)'
             result[name] = {'enabled': True, 'ready': ready,
                             'rate_hz': rate, 'reason': reason}
+
+        # Audio: device-presence check (cheap, cached) — no rate.
+        if self.captures_audio:
+            ok = bool(getattr(self, '_audio_ready', False))
+            result['audio'] = {
+                'enabled': True, 'ready': ok, 'rate_hz': 0.0,
+                'reason': 'ok' if ok else getattr(self, '_audio_reason', 'no device')}
+        else:
+            result['audio'] = {'enabled': False, 'ready': False,
+                               'rate_hz': 0.0, 'reason': 'disabled'}
         return {'sensors': result, 'any_ready': any_ready}
+
+    def _check_audio_device(self):
+        """One-shot audio-device presence check (cached). Cheap; not per-frame."""
+        if not self.captures_audio:
+            self._audio_ready, self._audio_reason = False, 'disabled'
+            return
+        try:
+            from src.recorder.audio_recorder import (
+                list_input_devices, find_capture_card_device)
+            if isinstance(self._audio_device, str) and \
+                    self._audio_device.lower() in ('hdmi', 'auto-hdmi', 'capture', 'camera'):
+                found = find_capture_card_device()
+                ok = found is not None
+                reason = 'ok (HDMI capture card)' if ok else 'no HDMI capture-card audio'
+            else:
+                ok = len(list_input_devices()) > 0
+                reason = 'ok' if ok else 'no input device'
+        except Exception as e:
+            ok, reason = False, f'sounddevice unavailable: {str(e)[:40]}'
+        self._audio_ready, self._audio_reason = ok, reason
+        state = SensorState.STREAMING if ok else SensorState.ERROR
+        self.registry.set_state('audio', state, reason)
+        self.sio.emit('device_status', {'device': 'audio', 'ok': ok, 'msg': reason})
 
     def _validate_session(self, duration):
         """
@@ -395,11 +468,12 @@ class DeviceManager:
             'csi':      os.path.join(self.session_dir, 'csi', 'csi_log.csv'),
             'emg':      os.path.join(self.session_dir, 'emg', 'emg_log.csv'),
             'gsr':      os.path.join(self.session_dir, 'gsr', 'gsr_log.csv'),
+            'thermal':  os.path.join(self.session_dir, 'thermal', 'timestamps.csv'),
         }
         counters = {
             'camera': self.cam_frames, 'oximeter': self.oxi_samples,
             'csi': self.csi_packets, 'emg': self.emg_packets,
-            'gsr': self.gsr_samples,
+            'gsr': self.gsr_samples, 'thermal': self.thermal_frames,
         }
 
         enabled = set(self._enabled_sensors())
@@ -496,6 +570,7 @@ class DeviceManager:
             ('oximeter', self.oximeter, 5, 8),
             ('emg',      self.emg,      5, 8),
             ('gsr',      self.gsr,      5, 8),
+            ('thermal',  self.thermal,  3, 5),   # source='none' → auto-disabled
         ]
 
         for name, handler, retries, delay in handlers:
@@ -513,6 +588,9 @@ class DeviceManager:
             t.start()
             self._threads[name] = t
 
+        # Audio device presence (one-shot, cached — validated but not streamed).
+        self._check_audio_device()
+
         # Live data-quality monitor (runs whenever monitoring is active)
         self._qa_stop.clear()
         self._qa_thread = threading.Thread(
@@ -525,7 +603,7 @@ class DeviceManager:
         self._qa_stop.set()
         self.monitoring = False
         for handler in [self.camera, self.oximeter, self.csi,
-                        self.emg, self.gsr]:
+                        self.emg, self.gsr, self.thermal]:
             handler.stop()
         
         # Join all threads to ensure they exit and release their resources/locks
@@ -576,7 +654,7 @@ class DeviceManager:
         self.session_dir = os.path.join(
             PROJECT_ROOT, 'data', 'raw', self.session_id,
         )
-        for sub in ['camera', 'oximeter', 'csi', 'emg', 'gsr']:
+        for sub in ['camera', 'oximeter', 'csi', 'emg', 'gsr', 'thermal', 'audio']:
             os.makedirs(os.path.join(self.session_dir, sub), exist_ok=True)
 
         self.rec_start = time.monotonic()
@@ -586,13 +664,32 @@ class DeviceManager:
         self.recording = True
 
         for handler in [self.camera, self.oximeter, self.csi,
-                        self.emg, self.gsr]:
+                        self.emg, self.gsr, self.thermal]:
             # Set the timestamp origin and output dir BEFORE flipping `recording`
             # on, so a handler thread can never observe recording==True while
             # rec_start is still None (which would compute monotonic() - None).
             handler.session_dir = self.session_dir
             handler.rec_start = self.rec_start
             handler.recording = True
+
+        # Audio: recorder-owned mic on the same rec_start origin (degrades cleanly).
+        self.audio = None
+        if self.captures_audio:
+            try:
+                from src.recorder.audio_recorder import AudioRecorder
+                kw = {} if self._audio_device is None else {'device': self._audio_device}
+                self.audio = AudioRecorder(
+                    os.path.join(self.session_dir, 'audio'), self.rec_start, **kw)
+                self.audio.start()
+                self.registry.set_state('audio', SensorState.STREAMING, 'capturing')
+                self.sio.emit('device_status', {'device': 'audio', 'ok': True,
+                                                 'msg': 'capturing'})
+            except Exception as e:
+                reason = str(e)[:200] or e.__class__.__name__
+                self.registry.set_state('audio', SensorState.ERROR, reason)
+                self.sio.emit('device_status', {'device': 'audio', 'ok': False,
+                                                 'msg': f'NOT recording: {reason}'})
+                self.audio = None
 
         meta = {
             'session_id': self.session_id,
@@ -650,9 +747,16 @@ class DeviceManager:
     def stop_recording(self):
         self.recording = False
         for handler in [self.camera, self.oximeter, self.csi,
-                        self.emg, self.gsr]:
+                        self.emg, self.gsr, self.thermal]:
             handler.recording = False
         self.camera.stop_recording_files()
+        self.thermal.stop_recording_files()
+        if self.audio is not None:
+            try:
+                self.audio.stop()          # writes audio.wav + audio_meta.json
+            except Exception:
+                pass
+            self.audio = None
         time.sleep(0.3)
 
         if self.session_dir:
@@ -671,7 +775,7 @@ class DeviceManager:
                 meta['stats'] = {
                     'cam': self.cam_frames, 'oxi': self.oxi_samples,
                     'csi': self.csi_packets, 'emg': self.emg_packets,
-                    'gsr': self.gsr_samples,
+                    'gsr': self.gsr_samples, 'thermal': self.thermal_frames,
                 }
                 if report:
                     meta['quality'] = report
@@ -688,6 +792,9 @@ class DeviceManager:
 
     def gen_mjpeg(self):
         return self.camera.gen_mjpeg()
+
+    def gen_thermal_mjpeg(self):
+        return self.thermal.gen_mjpeg()
 
     @staticmethod
     def scan_video_devices():
@@ -711,6 +818,13 @@ def _register_routes():
     def video_feed():
         if dm:
             return Response(dm.gen_mjpeg(),
+                            mimetype='multipart/x-mixed-replace; boundary=frame')
+        return '', 204
+
+    @app.route('/thermal_feed')
+    def thermal_feed():
+        if dm:
+            return Response(dm.gen_thermal_mjpeg(),
                             mimetype='multipart/x-mixed-replace; boundary=frame')
         return '', 204
 
@@ -749,7 +863,14 @@ def _register_routes():
                  for p in serial.tools.list_ports.comports()
                  if 'ttyUSB' in p.device or 'ttyACM' in p.device]
         video = DeviceManager.scan_video_devices()
-        return jsonify({'serial': ports, 'video': video})
+        audio = []
+        try:
+            from src.recorder.audio_recorder import list_input_devices
+            audio = [{'device': str(i), 'description': f'[{i}] {name} ({ch}ch)'}
+                     for i, name, ch in list_input_devices()]
+        except Exception:
+            pass                       # sounddevice not installed → no audio options
+        return jsonify({'serial': ports, 'video': video, 'audio': audio})
 
     @app.route('/api/start_monitoring', methods=['POST'])
     def api_start_monitoring():
@@ -761,6 +882,10 @@ def _register_routes():
         dm.csi.port = data.get('csi', 'none')
         dm.emg.port_cfg = data.get('emg', 'none')
         dm.gsr.port_cfg = data.get('gsr', 'none')
+        dm.thermal.source = data.get('thermal', 'none')
+        audio_dev = data.get('audio', 'none')
+        dm.captures_audio = audio_dev not in ('none', '', None)
+        dm._audio_device = None if not dm.captures_audio else audio_dev
         dm.start_monitoring()
         return jsonify({'success': True})
 
@@ -829,7 +954,8 @@ def _register_socket_events():
     def handle_connect():
         if dm:
             from flask_socketio import emit
-            for sensor in ['camera', 'oximeter', 'csi', 'emg', 'gsr']:
+            for sensor in ['camera', 'oximeter', 'csi', 'emg', 'gsr',
+                           'thermal', 'audio']:
                 ok = dm.registry.is_ok(sensor)
                 info = dm.registry.get_sensor(sensor)
                 msg = info.status_msg if info else 'Unknown'
@@ -1009,6 +1135,16 @@ def _build_parser():
     parser.add_argument('--emg-baud', type=int, default=230400)
     parser.add_argument('--gsr-port', type=str, default='auto')
     parser.add_argument('--gsr-baud', type=int, default=115200)
+    parser.add_argument('--thermal-source', type=str, default='none',
+                        help="Thermal V4L2 node (/dev/videoN, e.g. the FLIR at "
+                             "/dev/video1), 'screen[:l,t,w,h]', or 'none'")
+    parser.add_argument('--thermal-crop', type=str, default=None,
+                        help="Crop the FLIR overlays off recorded frames: "
+                             "'top,bottom,left,right' px (e.g. '0,20,0,45')")
+    parser.add_argument('--audio', action='store_true',
+                        help='Capture recorder-owned audio on the master clock')
+    parser.add_argument('--audio-device', type=str, default=None,
+                        help="Audio input index/name, or 'hdmi' for the capture card")
     # Legacy
     parser.add_argument('--camera-id', type=int, default=None)
     return parser
@@ -1053,6 +1189,9 @@ def main():
             csi_baud=args.csi_baud, emg_port=args.emg_port,
             emg_baud=args.emg_baud, gsr_port=args.gsr_port,
             gsr_baud=args.gsr_baud,
+            thermal_source=args.thermal_source, thermal_crop=args.thermal_crop,
+            audio=args.audio,
+            audio_device=args.audio_device,
         )
 
         _run_headless(dm, args.subject, args.duration, force=args.force)
@@ -1067,6 +1206,9 @@ def main():
             csi_baud=args.csi_baud, emg_port=args.emg_port,
             emg_baud=args.emg_baud, gsr_port=args.gsr_port,
             gsr_baud=args.gsr_baud,
+            thermal_source=args.thermal_source, thermal_crop=args.thermal_crop,
+            audio=args.audio,
+            audio_device=args.audio_device,
         )
 
         print()

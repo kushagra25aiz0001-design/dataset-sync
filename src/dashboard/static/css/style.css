@@ -783,3 +783,49 @@ body::before {
 .hidden {
     display: none !important;
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   LIGHTWEIGHT MODE  (appended last → wins the cascade)
+   Data collection must never stutter because the browser is busy compositing.
+   These overrides remove the continuous-repaint offenders while keeping the
+   layout and colours intact:
+     • backdrop-filter blur — GPU-heavy, recomposites every frame behind glass
+     • pulse-dot keyframe    — ran forever on every status dot (now 5–7 of them)
+     • transitions on live data elements — value changes triggered layout work
+   Static colour still conveys connected/disconnected; the REC dot keeps blinking.
+   ══════════════════════════════════════════════════════════════════════════ */
+.glass-panel,
+.card,
+.modal-content,
+#main-header,
+[style*="backdrop-filter"] {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+}
+
+/* Stop the never-ending status-dot pulse (colour already shows state). */
+.badge .dot,
+.dot {
+    animation: none !important;
+}
+
+/* Don't animate values/gauges/badges that update many times per second. */
+.badge,
+.stat-value,
+.gauge-value,
+.gauge-arc,
+.card-meta,
+#thermal-rate,
+#thermal-count,
+.cam-detail-badge {
+    transition: none !important;
+}
+
+/* Respect the OS "reduce motion" setting — kill everything animated. */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+    }
+}

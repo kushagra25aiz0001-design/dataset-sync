@@ -39,7 +39,7 @@ Usage
 
 import json
 import os
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 
 # ─── Index core (pure standard library, unit-tested) ─────────────────────────

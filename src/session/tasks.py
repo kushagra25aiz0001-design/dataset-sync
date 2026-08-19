@@ -160,3 +160,36 @@ class QuestionnaireTask(Task):
         ctx.record_response(self.qname, answers)
         ctx.bridge.mark(f'questionnaire_done:{self.qname}', n_items=len(self.items))
         ctx.bridge.block_end(self.block_id)
+
+
+class BpReadTask(Task):
+    """
+    Blood-pressure cuff reading entered by the operator. A cuff gives an
+    intermittent reading (not a continuous stream), so BP is a master-clock
+    *event*: the reading is stamped as a `rating:BP:<label>` marker the moment it
+    is entered, carrying systolic/diastolic/pulse. This ties each reading to the
+    exact physiological moment (e.g. a posture transition) on the shared clock.
+    """
+    name = 'bp_read'
+    planned_duration_s = 0.0
+
+    def __init__(self, label: str = 'rest', fields=('systolic', 'diastolic', 'pulse')):
+        self.label = label
+        self.fields = tuple(fields)
+        self.name = f'bp_read:{label}'
+
+    def run(self, ctx):
+        ctx.emit('instruction', text=f'Enter the BP cuff reading ({self.label}).')
+        vals = {}
+        for f in self.fields:
+            if ctx.aborted():
+                break
+            ans = ctx.ask(f'BP {f}', scale='BP', field=f, label=self.label,
+                          kind='number')
+            try:
+                vals[f] = int(ans)
+            except (TypeError, ValueError):
+                vals[f] = ans
+        ctx.record_response(f'BP:{self.label}', vals)
+        # rating:BP:<label> — the audit recognises this as the BP modality.
+        ctx.bridge.rating('BP', self.label, **vals)

@@ -54,23 +54,36 @@ class RecorderBridge:
             # recorder refused (e.g. readiness/disk gate)
             return {'session_id': None, 't0_monotonic': None, 'ok': False}
         t0 = self.recorder.rec_start
-        self.markers = SyncMarkerLog(self.recorder.session_dir, t0)
+        # Reuse the recorder's own marker log if it owns one (the daemon does), so
+        # there is a single markers.csv writer shared with any external task app.
+        # Only create/close our own when the recorder doesn't provide one (tests).
+        self.markers = getattr(self.recorder, 'markers', None)
+        self._owns_markers = self.markers is None
+        if self._owns_markers:
+            self.markers = SyncMarkerLog(self.recorder.session_dir, t0)
+            self.markers.session_start(subject=subject, duration=duration,
+                                       session_id=sid, audio=bool(audio))
         self.recording = True
         self.session_id = sid
-        self.markers.session_start(subject=subject, duration=duration,
-                                   session_id=sid, audio=bool(audio))
 
         if audio:
-            try:
-                from src.recorder.audio_recorder import AudioRecorder
-                self.audio = AudioRecorder(
-                    os.path.join(self.recorder.session_dir, 'audio'), t0,
-                    **(audio_kwargs or {}))
-                self.audio.start()
-                self.markers.mark('audio_start', source='backend')
-            except Exception as e:  # missing sounddevice / no mic — degrade, don't crash
-                self.markers.mark('audio_unavailable', error=str(e)[:160])
-                self.audio = None
+            if getattr(self.recorder, 'captures_audio', False):
+                # The recorder owns audio on the same rec_start origin — do NOT
+                # open a second, competing mic stream. Just note who owns it.
+                started = getattr(self.recorder, 'audio', None) is not None
+                self.markers.mark('audio_start' if started else 'audio_unavailable',
+                                  source='recorder')
+            else:
+                try:
+                    from src.recorder.audio_recorder import AudioRecorder
+                    self.audio = AudioRecorder(
+                        os.path.join(self.recorder.session_dir, 'audio'), t0,
+                        **(audio_kwargs or {}))
+                    self.audio.start()
+                    self.markers.mark('audio_start', source='backend')
+                except Exception as e:  # missing sounddevice / no mic — degrade, don't crash
+                    self.markers.mark('audio_unavailable', error=str(e)[:160])
+                    self.audio = None
         return {'session_id': sid, 't0_monotonic': t0, 'ok': True}
 
     def stop(self) -> dict:
@@ -82,8 +95,11 @@ class RecorderBridge:
                 pass
             self.audio = None
         if self.markers is not None:
-            self.markers.session_end()
-            self.markers.close()
+            # Only finalize the marker log if we created it; if the recorder owns
+            # it, the recorder's stop_recording() writes session_end + closes it.
+            if getattr(self, '_owns_markers', True):
+                self.markers.session_end()
+                self.markers.close()
             self.markers = None
         self.recording = False
         try:
@@ -139,7 +155,7 @@ class RecorderBridge:
                'sensors': {}}
         if reg is None:
             return out
-        for name in ['camera', 'oximeter', 'csi', 'emg', 'gsr']:
+        for name in ['camera', 'oximeter', 'csi', 'emg', 'gsr', 'thermal']:
             try:
                 info = reg.get_sensor(name)
             except Exception:

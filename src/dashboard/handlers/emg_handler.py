@@ -18,6 +18,7 @@ import os
 import threading
 import time
 import math
+import queue as _queue
 import random
 
 import serial
@@ -47,10 +48,40 @@ class EMGHandler:
         self.baud = baud
         self._stop = threading.Event()
 
+        # Non-blocking SocketIO emit queue. EMG streams at a high packet rate, and
+        # emitting straight from the capture thread means a slow/contended socket
+        # back-pressures sample reading — dropping real EMG samples AND stalling the
+        # shared event loop (which lags every other modality). Decouple it exactly
+        # like the GSR/CSI/oximeter handlers: enqueue, a worker drains to the socket,
+        # drop stale display frames on overflow (the recording is unaffected).
+        self._emit_q = _queue.Queue(maxsize=120)
+        self._emit_thread = threading.Thread(
+            target=self._emit_worker, daemon=True, name='emg-emit')
+        self._emit_thread.start()
+
         # Recording state (set externally)
         self.recording = False
         self.session_dir = None
         self.rec_start = None
+
+    def _emit_worker(self):
+        """Drain the emit queue to the socket off the capture thread."""
+        while True:
+            try:
+                event, data = self._emit_q.get(timeout=1.0)
+                self.sio.emit(event, data)
+            except _queue.Empty:
+                if self._stop.is_set():
+                    break
+            except Exception:
+                pass
+
+    def _safe_emit(self, event: str, data: dict) -> None:
+        """Enqueue a UI update; never blocks the caller (drops on overflow)."""
+        try:
+            self._emit_q.put_nowait((event, data))
+        except _queue.Full:
+            pass
 
     def _get_port(self) -> str:
         """Get the assigned port from config or registry."""
@@ -116,7 +147,7 @@ class EMGHandler:
                         val = int(2048.0 + envelope * random.uniform(-1.0, 1.0) + noise)
                         channels.append(max(0, min(4095, val)))
                     
-                    self.sio.emit('emg_data', {
+                    self._safe_emit('emg_data', {
                         'channels': channels,
                         'n': mock_pkts,
                     })
@@ -152,14 +183,11 @@ class EMGHandler:
                     buf.extend(chunk)
 
                     while len(buf) >= PACKET_SIZE:
-                        # Find sync bytes
-                        idx = -1
-                        for i in range(len(buf) - 1):
-                            if buf[i] == 0xC7 and buf[i + 1] == 0x7C:
-                                idx = i
-                                break
+                        # Find sync bytes with a C-level scan (bytearray.find),
+                        # not a per-byte Python loop over the whole buffer.
+                        idx = buf.find(SYNC_BYTES)
                         if idx < 0:
-                            del buf[:-1]
+                            del buf[:-1]            # keep last byte (partial sync)
                             break
                         if idx > 0:
                             del buf[:idx]
@@ -181,27 +209,31 @@ class EMGHandler:
                         # fabricate them into the recording. We build a SEPARATE
                         # display_channels purely so the live dashboard shows all
                         # 16 traces animated; this is cosmetic and never recorded.
-                        display_channels = list(channels)
-                        if all(v == 0 for v in channels[3:]):
-                            t_sec = time.time()
-                            ref_envelope = channels[2]  # modulate by the real channel
-                            for c in range(3, NUM_CHANNELS):
-                                freq = 0.5 + (c * 0.17)
-                                phase = c * 0.5
-                                base_envelope = 100.0 + 150.0 * (0.5 + 0.5 * math.sin(t_sec * freq + phase))
-                                if ref_envelope > 50:
-                                    env_factor = ref_envelope / 200.0
-                                    active_val = base_envelope * env_factor
-                                else:
-                                    active_val = base_envelope * 0.2
-                                noise = random.uniform(-50, 50)
-                                val = int(2048.0 + active_val * random.uniform(-1.0, 1.0) + noise)
-                                display_channels[c] = max(0, min(4095, val))
                         self.registry.set_counter('emg', local_pkts)
 
-                        # Emit every 10th packet (display-only synthetic channels)
+                        # Emit only every 10th packet. Build the display-only
+                        # synthetic channels HERE, inside the throttle, so the 90% of
+                        # packets we never send cost nothing extra on the capture
+                        # thread (sin/random over 13 channels per packet was pure
+                        # waste). The REAL `channels` written to disk are untouched.
                         if local_pkts % 10 == 0:
-                            self.sio.emit('emg_data', {
+                            display_channels = list(channels)
+                            if all(v == 0 for v in channels[3:]):
+                                t_sec = time.time()
+                                ref_envelope = channels[2]  # modulate by the real channel
+                                for c in range(3, NUM_CHANNELS):
+                                    freq = 0.5 + (c * 0.17)
+                                    phase = c * 0.5
+                                    base_envelope = 100.0 + 150.0 * (0.5 + 0.5 * math.sin(t_sec * freq + phase))
+                                    if ref_envelope > 50:
+                                        env_factor = ref_envelope / 200.0
+                                        active_val = base_envelope * env_factor
+                                    else:
+                                        active_val = base_envelope * 0.2
+                                    noise = random.uniform(-50, 50)
+                                    val = int(2048.0 + active_val * random.uniform(-1.0, 1.0) + noise)
+                                    display_channels[c] = max(0, min(4095, val))
+                            self._safe_emit('emg_data', {
                                 'channels': display_channels,
                                 'n': local_pkts,
                             })

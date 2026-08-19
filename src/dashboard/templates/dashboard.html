@@ -30,6 +30,8 @@
             <span id="badge-csi" class="badge disconnected"><span class="dot"></span> CSI</span>
             <span id="badge-emg" class="badge disconnected"><span class="dot"></span> EMG</span>
             <span id="badge-gsr" class="badge disconnected"><span class="dot"></span> GSR</span>
+            <span id="badge-thermal" class="badge disconnected"><span class="dot"></span> Thermal</span>
+            <span id="badge-audio" class="badge disconnected"><span class="dot"></span> Audio</span>
         </div>
         <div id="rec-indicator" class="rec-indicator hidden">
             <span class="rec-dot"></span> REC
@@ -59,6 +61,7 @@
         <div class="card-footer cam-footer">
             <span id="cam-count">Frames: 0</span>
             <div id="cam-details" class="cam-details">
+                <span id="audio-state" class="cam-detail-badge" title="Camera audio (HDMI)">🎙️ off</span>
                 <span id="cam-resolution" class="cam-detail-badge" title="Resolution">—</span>
                 <span id="cam-fps" class="cam-detail-badge" title="FPS">—</span>
                 <span id="cam-format" class="cam-detail-badge" title="Pixel format">—</span>
@@ -186,6 +189,24 @@
         </div>
     </section>
 
+    <!-- Thermal Panel (live preview ON — to watch the FLIR refresh rate) -->
+    <section id="panel-thermal" class="card">
+        <div class="card-header">
+            <h2>🌡️ Thermal Camera</h2>
+            <span id="thermal-info" class="card-meta">—</span>
+        </div>
+        <div class="card-body camera-body">
+            <img id="thermal-feed" src="/thermal_feed" alt="Live Thermal Feed" crossorigin="anonymous">
+        </div>
+        <div class="card-footer">
+            <span id="thermal-count">Frames: 0</span>
+            <span id="thermal-rate">— Hz</span>
+        </div>
+    </section>
+
+    <!-- Audio is captured from the camera (HDMI) — shown in the camera panel
+         footer, not a separate card (saves space). -->
+
     <!-- Controls Panel -->
     <section id="panel-controls" class="card controls-card">
         <div class="card-header">
@@ -271,6 +292,21 @@
             <div class="setup-row">
                 <label>💧 Skin GSR</label>
                 <select id="setup-gsr">
+                    <option value="none">None (Disabled)</option>
+                </select>
+            </div>
+            <div class="setup-row">
+                <label>🌡️ Thermal Cam</label>
+                <select id="setup-thermal">
+                    <option value="none">None (Disabled)</option>
+                    <option value="screen">Screen share (full)</option>
+                </select>
+            </div>
+            <div class="setup-row">
+                <label>🎙️ Audio</label>
+                <select id="setup-audio">
+                    <option value="default" selected>Default input — PC audio jack / mic (DJI, wired)</option>
+                    <option value="hdmi">Camera audio (HDMI)</option>
                     <option value="none">None (Disabled)</option>
                 </select>
             </div>

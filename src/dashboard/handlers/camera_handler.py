@@ -408,7 +408,10 @@ class CameraHandler:
                     continue
 
                 # ── Preview (throttled) ──────────────────────────────
-                if frame_count % 2 == 0 or actual_fps <= 15:
+                # Skip preview JPEG encoding entirely while recording: the browser
+                # freezes the preview during a session anyway, so this frees the
+                # recording machine's CPU for the actual capture/encode.
+                if not self.recording and (frame_count % 2 == 0 or actual_fps <= 15):
                     try:
                         preview = cv2.resize(raw, (preview_w, preview_h),
                                              interpolation=cv2.INTER_LINEAR) if preview_scale else raw

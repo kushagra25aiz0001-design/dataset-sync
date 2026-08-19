@@ -86,7 +86,7 @@ const csiChart = new Chart(csiCtx, {
     options: {
         responsive: true,
         maintainAspectRatio: false,
-        animation: { duration: 150 },
+        animation: false,
         scales: {
             x: {
                 display: true,
@@ -302,6 +302,18 @@ socket.on('device_status', (data) => {
     } else if (device === 'gsr') {
         badge = document.getElementById('badge-gsr');
         infoEl = document.getElementById('gsr-info');
+    } else if (device === 'thermal') {
+        badge = document.getElementById('badge-thermal');
+        infoEl = document.getElementById('thermal-info');
+    } else if (device === 'audio') {
+        badge = document.getElementById('badge-audio');
+        // Audio status lives in the camera footer now; show state + reason-on-hover.
+        const audState = document.getElementById('audio-state');
+        if (audState) {
+            audState.textContent = ok ? '🎙️ REC' : '🎙️ FAILED';
+            audState.title = msg || '';
+        }
+        if (!ok && msg) console.warn('[audio] ' + msg);
     }
 
     if (badge) {
@@ -314,6 +326,14 @@ socket.on('device_status', (data) => {
 
 socket.on('camera_info', (info) => {
     updateCameraInfo(info);
+});
+
+// Lightweight live-rate strip (1 Hz). Only used to fill the thermal Hz readout;
+// no charts, no history buffers — keeps the browser idle during long recordings.
+socket.on('qa_update', (data) => {
+    if (!data || !data.rates) return;
+    const el = document.getElementById('thermal-rate');
+    if (el && data.rates.thermal !== undefined) el.textContent = `${data.rates.thermal} Hz`;
 });
 
 socket.on('oxi_data', (data) => {
@@ -353,16 +373,18 @@ socket.on('oxi_data', (data) => {
     document.getElementById('oxi-signal').textContent = `Signal: ${sigBars}`;
 });
 
+// Sensor packets arrive far faster than a screen can (EMG ~250/s, CSI ~60/s). We
+// only STORE the latest values here and mark the chart dirty; a single throttled
+// loop below repaints at most ~10 fps, so canvas redraws never thrash the CPU or
+// compete with data collection.
+let _csiDirty = false, _emgDirty = false, _emgChannels = null;
+
 socket.on('csi_data', (data) => {
     const { amps, rssi, n } = data;
-
     if (amps && amps.length > 0) {
         csiAmps = amps;
-        csiChart.data.datasets[0].data = csiAmps;
-        csiChart.data.labels = Array.from({ length: amps.length }, (_, i) => i);
-        csiChart.update();
+        _csiDirty = true;
     }
-
     document.getElementById('csi-rssi').textContent = `${rssi} dBm`;
     document.getElementById('csi-count').textContent = `Packets: ${n}`;
 });
@@ -370,11 +392,28 @@ socket.on('csi_data', (data) => {
 socket.on('emg_data', (data) => {
     const { channels, n } = data;
     if (channels && channels.length === 16) {
-        emgChart.data.datasets[0].data = channels;
-        emgChart.update();
+        _emgChannels = channels;
+        _emgDirty = true;
     }
     document.getElementById('emg-count').textContent = `Packets: ${n}`;
 });
+
+// Throttled chart repaint (~10 fps), skipped when the tab is hidden OR while
+// recording (during a session the browser stays idle — only the REC dot blinks).
+setInterval(() => {
+    if (document.hidden || isRecording) return;
+    if (_csiDirty && csiAmps) {
+        csiChart.data.datasets[0].data = csiAmps;
+        csiChart.data.labels = csiAmps.map((_, i) => i);
+        csiChart.update('none');            // 'none' → redraw without animation
+        _csiDirty = false;
+    }
+    if (_emgDirty && _emgChannels) {
+        emgChart.data.datasets[0].data = _emgChannels;
+        emgChart.update('none');
+        _emgDirty = false;
+    }
+}, 100);
 
 socket.on('gsr_data', (data) => {
     const { uS, raw, stress, zscore, n, cal_progress } = data;
@@ -412,6 +451,7 @@ socket.on('rec_started', (data) => {
     document.getElementById('btn-stop').disabled = false;
     document.getElementById('rec-indicator').classList.remove('hidden');
     document.getElementById('progress-container').style.display = 'block';
+    freezeCameraPreview(true);   // stop the MJPEG decode; just blink the REC dot
     startTimer();
 });
 
@@ -420,6 +460,7 @@ socket.on('rec_stopped', (data) => {
     document.getElementById('btn-start').disabled = false;
     document.getElementById('btn-stop').disabled = true;
     document.getElementById('rec-indicator').classList.add('hidden');
+    freezeCameraPreview(false);  // resume the live preview
     stopTimer();
 
     const msg = `✅ ${data.session} — ${data.frames} frames, ${data.oxi} oxi samples, ${data.csi} CSI packets`;
@@ -429,6 +470,24 @@ socket.on('rec_stopped', (data) => {
         document.getElementById('progress-container').style.display = 'none';
         document.getElementById('progress-bar').style.width = '0%';
     }, 3000);
+});
+
+// Recording refused by the readiness gate — tell the operator exactly why
+// (previously this was silent, so "nothing happened" on Start).
+socket.on('rec_blocked', (data) => {
+    const sensors = (data && data.readiness && data.readiness.sensors) || {};
+    const notReady = Object.entries(sensors)
+        .filter(([, d]) => d.enabled && !d.ready)
+        .map(([n, d]) => `• ${n}: ${d.reason}`);
+    const label = document.getElementById('session-label');
+    if (label) label.textContent = '⚠ Recording blocked — no sensor producing data yet';
+    const btnStart = document.getElementById('btn-start');
+    const btnStop = document.getElementById('btn-stop');
+    if (btnStart) btnStart.disabled = false;
+    if (btnStop) btnStop.disabled = true;
+    alert('Recording did not start — the readiness gate found no sensor producing '
+        + 'data.\n\n' + (notReady.length ? notReady.join('\n') : 'No sensors enabled.')
+        + '\n\nWait for the sensor badge to turn green, then press Start again.');
 });
 
 socket.on('record_format_changed', (data) => {
@@ -522,6 +581,8 @@ statusInterval = setInterval(async () => {
         updateBadge('badge-csi', d.csi_ok);
         updateBadge('badge-emg', d.emg_ok);
         updateBadge('badge-gsr', d.gsr_ok);
+        updateBadge('badge-thermal', d.thermal_ok);
+        updateBadge('badge-audio', d.audio_ok);
 
         // Update card meta descriptions
         if (d.sensors) {
@@ -536,6 +597,8 @@ statusInterval = setInterval(async () => {
             updateInfo('csi-info', d.sensors.csi);
             updateInfo('emg-info', d.sensors.emg);
             updateInfo('gsr-info', d.sensors.gsr);
+            updateInfo('thermal-info', d.sensors.thermal);
+            updateInfo('audio-info', d.sensors.audio);
         }
 
         // Update counters
@@ -548,10 +611,15 @@ statusInterval = setInterval(async () => {
             document.getElementById('emg-count').textContent = `Packets: ${d.emg_packets}`;
         if (d.gsr_samples > 0)
             document.getElementById('gsr-count').textContent = `Samples: ${d.gsr_samples}`;
+        if (d.thermal_frames > 0)
+            document.getElementById('thermal-count').textContent = `Frames: ${d.thermal_frames}`;
+        const audState = document.getElementById('audio-state');
+        if (audState) audState.textContent = (d.recording && d.audio_ok) ? '🎙️ REC'
+                                          : (d.audio_ok ? '🎙️ ready' : '🎙️ off');
 
-        // Camera overlay
+        // Camera overlay (leave the "preview paused" overlay alone while recording)
         const overlay = document.getElementById('cam-overlay');
-        if (d.cam_ok && overlay) {
+        if (!isRecording && d.cam_ok && overlay) {
             overlay.style.display = 'none';
         }
 
@@ -578,11 +646,36 @@ _probeCanvas.height = 4;
 const _probeCtx = _probeCanvas.getContext('2d', { willReadFrequently: true });
 
 function _hideCamOverlay() {
+    if (isRecording) return;          // keep the "preview paused" overlay during rec
     if (camOverlay) {
         camOverlay.style.display = 'none';
     }
     const badge = document.getElementById('badge-cam');
     if (badge) badge.className = 'badge connected';
+}
+
+// ── Camera preview freeze during recording ──────────────────────────────────
+// The frames are still written to disk by the recorder; we simply stop the
+// browser from decoding the MJPEG stream (the biggest per-frame cost) and the
+// 300 ms pixel-probe below. Only the blinking REC dot remains.
+const _camOverlayDefaultHTML = camOverlay ? camOverlay.innerHTML : '';
+function freezeCameraPreview(paused) {
+    if (!camFeed) return;
+    if (paused) {
+        camFeed.removeAttribute('src');   // closes the MJPEG connection → no decode
+        if (camOverlay) {
+            camOverlay.innerHTML =
+                '<div class="cam-overlay-inner"><span class="rec-dot"></span>'
+              + '&nbsp;<span>Recording — live preview paused (light mode)</span></div>';
+            camOverlay.style.display = 'flex';
+        }
+    } else {
+        camFeed.src = '/video_feed';      // resume the live stream
+        if (camOverlay) {
+            camOverlay.innerHTML = _camOverlayDefaultHTML;
+            camOverlay.style.display = 'none';
+        }
+    }
 }
 
 function _showCamOverlay() {
@@ -616,12 +709,14 @@ camFeed.addEventListener('load', _hideCamOverlay);
 
 // Method 2: error → show overlay if stream is gone
 camFeed.addEventListener('error', () => {
+    if (isRecording) return;                                      // preview intentionally off
     if (camOverlay && camOverlay.style.display !== 'none') return; // already hidden, ignore
     _showCamOverlay();
 });
 
 // Method 3: Aggressive polling every 300ms — check both naturalWidth>0 AND pixel data
 const _camPollTimer = setInterval(() => {
+    if (isRecording) return;   // no probing while recording (preview is frozen)
     // MJPEG img gets naturalWidth > 0 only after first full frame decoded
     if (camFeed.naturalWidth > 0) {
         _hideCamOverlay();
@@ -737,7 +832,33 @@ async function fetchSetupPorts() {
         populate('setup-csi', data.serial, false, activePorts.csi);
         populate('setup-emg', data.serial, false, activePorts.emg);
         populate('setup-gsr', data.serial, false, activePorts.gsr);
-        
+
+        // Thermal: keep hardcoded (none, screen) + append any UVC video nodes.
+        const thSel = document.getElementById('setup-thermal');
+        if (thSel) {
+            thSel.innerHTML = '<option value="none">None (Disabled)</option>'
+                            + '<option value="screen">Screen share (full)</option>';
+            (data.video || []).forEach(opt => {
+                const val = (opt.path !== undefined && opt.path !== null) ? opt.path : opt.index;
+                const el = document.createElement('option');
+                el.value = val; el.textContent = `UVC ${opt.name} (${val})`;
+                thSel.appendChild(el);
+            });
+        }
+        // Audio: keep hardcoded (none, hdmi) + append input devices.
+        const auSel = document.getElementById('setup-audio');
+        if (auSel) {
+            // Default = the PC audio jack / system default input, where a DJI
+            // receiver or a wired mic (3.5 mm) shows up. HDMI + explicit devices too.
+            auSel.innerHTML = '<option value="default" selected>Default input — PC audio jack / mic (DJI, wired)</option>'
+                            + '<option value="hdmi">Camera audio (HDMI)</option>'
+                            + '<option value="none">None (Disabled)</option>';
+            (data.audio || []).forEach(opt => {
+                const el = document.createElement('option');
+                el.value = opt.device; el.textContent = opt.description;
+                auSel.appendChild(el);
+            });
+        }
     } catch (err) {
         console.error('Failed to fetch ports:', err);
     }
@@ -749,7 +870,9 @@ async function startSystem() {
         oximeter: document.getElementById('setup-oxi').value,
         csi: document.getElementById('setup-csi').value,
         emg: document.getElementById('setup-emg').value,
-        gsr: document.getElementById('setup-gsr').value
+        gsr: document.getElementById('setup-gsr').value,
+        thermal: document.getElementById('setup-thermal')?.value || 'none',
+        audio: document.getElementById('setup-audio')?.value || 'none'
     };
 
     // Validation: prevent assigning same serial port to multiple sensors

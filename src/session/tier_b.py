@@ -16,7 +16,7 @@ Tasks:
     TLXRatingTask          NASA-TLX workload (6 subscales)
 """
 
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 from src.session.tasks import Task
 

@@ -68,3 +68,17 @@ GSR/
 /test.jpg
 /live_oximetry_data.csv
 /*.raw
+
+# ─── Personal ECG exports (contain name/DOB — never publish) ───────────
+ECG_DATA/
+*_ECGPDF.pdf
+
+# ─── Scratch / throwaway verification scripts ───────────
+scratchpad/
+
+# ─── Rotated logs ('*.log' alone misses dashboard.log.1) ───────────────
+*.log.*
+
+# ─── Emotion-elicitation stimuli: copyrighted film clips (~106 MB).
+# Never publish these — keep local, distribute out-of-band.
+media/

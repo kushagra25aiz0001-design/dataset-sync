@@ -14,7 +14,6 @@ Usage:
 import argparse
 import json
 import os
-import sys
 import time
 import threading
 from datetime import datetime, timezone, timedelta
@@ -26,7 +25,9 @@ from src.dashboard.handlers.oximeter_handler import OximeterHandler
 from src.dashboard.handlers.csi_handler import CSIHandler
 from src.dashboard.handlers.emg_handler import EMGHandler
 from src.dashboard.handlers.gsr_handler import GSRHandler
+from src.dashboard.handlers.thermal_handler import ThermalHandler
 from src.recorder.ipc_server import IpcSIO
+from src.recorder.sync_markers import SyncMarkerLog
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 
@@ -79,7 +80,10 @@ class HeadlessDaemon:
                  record_format='video', oxi_port='auto',
                  csi_port='/dev/ttyUSB1', csi_baud=115200,
                  emg_port='auto', emg_baud=230400,
-                 gsr_port='auto', gsr_baud=115200):
+                 gsr_port='auto', gsr_baud=115200,
+                 thermal_source='none', thermal_res=(256, 192), thermal_crop=None,
+                 audio=False, audio_kwargs=None, audio_device=None,
+                 ecg=False, ecg_address=None, marker_port=None):
 
         self.registry = SensorRegistry()
         self.record_format = record_format
@@ -98,6 +102,33 @@ class HeadlessDaemon:
         self.csi = CSIHandler(self.registry, self.sio, port=csi_port, baud=csi_baud)
         self.emg = EMGHandler(self.registry, self.sio, port=emg_port, baud=emg_baud)
         self.gsr = GSRHandler(self.registry, self.sio, port=gsr_port, baud=gsr_baud)
+        self.thermal = ThermalHandler(self.registry, self.sio,
+                                      source=thermal_source, resolution=thermal_res,
+                                      crop=thermal_crop)
+
+        # Audio is a first-class captured modality the daemon owns directly, so the
+        # whole recording path has a single authoritative clock owner (brief §1).
+        # `captures_audio` lets an embedding RecorderBridge defer to us instead of
+        # starting a second, competing microphone stream.
+        self.captures_audio = bool(audio)
+        self._audio_kwargs = dict(audio_kwargs or {})
+        if audio_device is not None:
+            self._audio_kwargs.setdefault('device', audio_device)
+        self.audio = None
+
+        # ECG ground truth is a Polar H10 over BLE (not serial), owned here too so
+        # its samples anchor to the same rec_start origin.
+        self.captures_ecg = bool(ecg)
+        self._ecg_address = ecg_address
+        self.ecg = None
+        self._ecg_stats = None
+
+        # The daemon owns the marker log so markers exist in "recording + external
+        # task app" mode (no session runner required). An optional HTTP ingest lets
+        # a separate task interface POST events that land on this master clock.
+        self.markers = None
+        self._marker_port = marker_port
+        self._ingest = None
 
         self.recording = False
         self.session_dir = None
@@ -134,10 +165,63 @@ class HeadlessDaemon:
                 f'Gave up after {max_retries} attempts',
             )
 
+    def mark(self, label, source='task', t_device_s=None, **payload):
+        """Stamp an event on the master clock. Returns the row dict, or None when
+        no session is active (the ingest server maps None → HTTP 409). This is the
+        single surface both the session runner and the external task app use."""
+        if self.markers is None:
+            return None
+        return self.markers.mark(label, source=source, t_device_s=t_device_s,
+                                 **payload)
+
+    def master_time(self):
+        """Current master-clock time (monotonic - rec_start), or None if idle."""
+        return (time.monotonic() - self.rec_start) if self.rec_start else None
+
+    # Marker convenience + health, so the OperatorConsole can drive the daemon
+    # directly (same surface as RecorderBridge).
+    def pause(self, **p):  return self.mark('pause', source='operator', **p)
+    def resume(self, **p): return self.mark('resume', source='operator', **p)
+    def abort(self, **p):  return self.mark('abort', source='operator', **p)
+
+    def get_health(self) -> dict:
+        """Per-sensor liveness snapshot for the operator console."""
+        out = {'recording': self.recording, 'session_id': self.session_id,
+               'sensors': {}}
+        reg = self.registry
+        for name in ['camera', 'oximeter', 'csi', 'emg', 'gsr', 'thermal']:
+            try:
+                info = reg.get_sensor(name)
+            except Exception:
+                info = None
+            if info is None:
+                continue
+            out['sensors'][name] = {
+                'state': getattr(getattr(info, 'state', None), 'value', str(info)),
+                'ok': reg.is_ok(name) if hasattr(reg, 'is_ok') else None,
+                'count': reg.get_counter(name) if hasattr(reg, 'get_counter') else None,
+            }
+        return out
+
     def start_monitoring(self):
         """Start all sensor threads. Oximeter gets priority."""
         self._stop.clear()
         self.sio.start()  # Start IPC state broadcaster
+
+        # Optional marker ingest for a separate task interface (lives for the whole
+        # daemon session; mark() guards on there being an active recording).
+        if self._marker_port is not None and self._ingest is None:
+            try:
+                from src.recorder.marker_ingest import MarkerIngestServer
+                self._ingest = MarkerIngestServer(
+                    self.mark, port=self._marker_port,
+                    health_fn=lambda: {'recording': self.recording,
+                                       'session_id': self.session_id},
+                    master_clock_fn=self.master_time).start()
+                print(f'  🛰  marker ingest listening on :{self._ingest.port} '
+                      f'(POST /mark)')
+            except Exception as e:
+                print(f'  ⚠ marker ingest unavailable: {str(e)[:120]}')
 
         # Define handlers: (name, handler, retries, delay, high_priority)
         handlers = [
@@ -146,6 +230,7 @@ class HeadlessDaemon:
             ('oximeter', self.oximeter, 10, 5, True),   # More retries, high priority
             ('emg',      self.emg,      5, 8,  False),
             ('gsr',      self.gsr,      5, 8,  False),
+            ('thermal',  self.thermal,  3, 5,  False),  # source='none' → disabled
         ]
 
         for name, handler, retries, delay, high_prio in handlers:
@@ -165,8 +250,11 @@ class HeadlessDaemon:
     def stop_monitoring(self):
         """Stop all sensor threads."""
         self._stop.set()
+        if self._ingest is not None:
+            self._ingest.stop()
+            self._ingest = None
         for handler in [self.camera, self.oximeter, self.csi,
-                        self.emg, self.gsr]:
+                        self.emg, self.gsr, self.thermal]:
             handler.stop()
         self.sio.stop()
 
@@ -177,7 +265,8 @@ class HeadlessDaemon:
         self.session_id = f"session_{ts}"
         self.session_dir = os.path.join(BASE_DIR, 'data', 'raw', self.session_id)
 
-        for sub in ['camera', 'oximeter', 'csi', 'emg', 'gsr']:
+        for sub in ['camera', 'oximeter', 'csi', 'emg', 'gsr', 'thermal',
+                    'audio', 'ecg']:
             os.makedirs(os.path.join(self.session_dir, sub), exist_ok=True)
 
         self.rec_start = time.monotonic()
@@ -185,13 +274,47 @@ class HeadlessDaemon:
         self.recording = True
 
         for handler in [self.camera, self.oximeter, self.csi,
-                        self.emg, self.gsr]:
+                        self.emg, self.gsr, self.thermal]:
             # Set the timestamp origin and output dir BEFORE flipping `recording`
             # on, so a handler thread can never observe recording==True while
             # rec_start is still None (would compute monotonic() - None).
             handler.session_dir = self.session_dir
             handler.rec_start = self.rec_start
             handler.recording = True
+
+        # Master-clock marker log, owned by the daemon. Both the in-process session
+        # runner and any external task app (via the ingest server) write here.
+        self.markers = SyncMarkerLog(self.session_dir, self.rec_start)
+        self.markers.session_start(subject=subject, duration=duration,
+                                   session_id=self.session_id)
+
+        # Audio: recorder-owned mic stream anchored to the SAME rec_start origin,
+        # so its t_start_master_s lands on the master clock. Degrades cleanly if
+        # sounddevice/mic are unavailable (never fabricates silence).
+        self.audio = None
+        if self.captures_audio:
+            try:
+                from src.recorder.audio_recorder import AudioRecorder
+                self.audio = AudioRecorder(
+                    os.path.join(self.session_dir, 'audio'), self.rec_start,
+                    **self._audio_kwargs)
+                self.audio.start()
+            except Exception as e:
+                print(f'  ⚠ audio unavailable: {str(e)[:120]}')
+                self.audio = None
+
+        # ECG (Polar H10 BLE) — degrades cleanly if bleak/strap are unavailable.
+        self.ecg = None
+        if self.captures_ecg:
+            try:
+                from src.recorder.ecg_recorder import PolarH10ECGRecorder
+                self.ecg = PolarH10ECGRecorder(
+                    os.path.join(self.session_dir, 'ecg'), self.rec_start,
+                    address=self._ecg_address)
+                self.ecg.start()
+            except Exception as e:
+                print(f'  ⚠ ECG unavailable: {str(e)[:120]}')
+                self.ecg = None
 
         # Save metadata
         meta = {
@@ -221,9 +344,29 @@ class HeadlessDaemon:
         self.recording = False
         self.sio.set_recording_state(False)
         for handler in [self.camera, self.oximeter, self.csi,
-                        self.emg, self.gsr]:
+                        self.emg, self.gsr, self.thermal]:
             handler.recording = False
         self.camera.stop_recording_files()
+        self.thermal.stop_recording_files()
+        if self.audio is not None:
+            try:
+                self.audio.stop()          # writes audio.wav + audio_meta.json
+            except Exception:
+                pass
+            self.audio = None
+        if self.ecg is not None:
+            try:
+                self._ecg_stats = self.ecg.stop()   # flushes ecg_log.csv
+            except Exception:
+                self._ecg_stats = None
+            self.ecg = None
+        if self.markers is not None:
+            try:
+                self.markers.session_end()
+                self.markers.close()
+            except Exception:
+                pass
+            self.markers = None
         time.sleep(0.3)
 
         if self.session_dir:
@@ -240,6 +383,8 @@ class HeadlessDaemon:
                     'csi': self.registry.get_counter('csi'),
                     'emg': self.registry.get_counter('emg'),
                     'gsr': self.registry.get_counter('gsr'),
+                    'thermal': self.registry.get_counter('thermal'),
+                    'ecg': (self._ecg_stats or {}).get('n_samples', 0),
                 }
                 with open(meta_path, 'w') as f:
                     json.dump(meta, f, indent=2)
@@ -263,8 +408,38 @@ def main():
     parser.add_argument('--emg-baud', type=int, default=230400)
     parser.add_argument('--gsr-port', type=str, default='auto')
     parser.add_argument('--gsr-baud', type=int, default=115200)
+    parser.add_argument('--thermal-source', type=str, default='none',
+                        help="Thermal camera V4L2 node (e.g. the FLIR at /dev/video1, "
+                             "or 'auto'); 'none' disables it")
+    parser.add_argument('--thermal-crop', type=str, default=None,
+                        help="Crop FLIR overlays off recorded frames: "
+                             "'top,bottom,left,right' px (e.g. '0,20,0,45')")
+    parser.add_argument('--audio', action='store_true',
+                        help='Capture recorder-owned audio on the master clock')
+    parser.add_argument('--audio-device', default=None,
+                        help="Audio input: device index/name, or 'hdmi' to auto-pick "
+                             "the capture card (a6000 audio-over-HDMI, same clock as video)")
+    parser.add_argument('--list-audio-devices', action='store_true',
+                        help='List audio input devices and exit')
+    parser.add_argument('--ecg', action='store_true',
+                        help='Capture Polar H10 ECG over BLE on the master clock')
+    parser.add_argument('--ecg-address', type=str, default=None,
+                        help='Polar H10 BLE address (default: scan by name)')
+    parser.add_argument('--marker-port', type=int, default=None,
+                        help='Start the HTTP marker-ingest server on this port so a '
+                             'separate task app can POST /mark events on the master clock')
+    parser.add_argument('--console', action='store_true',
+                        help='Live operator console (health board + [a]bort/[p]ause keys) '
+                             'instead of the plain status line')
 
     args = parser.parse_args()
+
+    if args.list_audio_devices:
+        from src.recorder.audio_recorder import list_input_devices
+        print('Audio input devices:')
+        for i, name, ch in list_input_devices():
+            print(f'  [{i}] {name}  ({ch} ch)')
+        return
 
     try:
         rw, rh = args.cam_res.split('x')
@@ -291,6 +466,11 @@ def main():
         csi_baud=args.csi_baud, emg_port=args.emg_port,
         emg_baud=args.emg_baud, gsr_port=args.gsr_port,
         gsr_baud=args.gsr_baud,
+        thermal_source=args.thermal_source, thermal_crop=args.thermal_crop,
+        audio=args.audio,
+        audio_device=args.audio_device,
+        ecg=args.ecg, ecg_address=args.ecg_address,
+        marker_port=args.marker_port,
     )
 
     daemon.start_monitoring()
@@ -300,7 +480,7 @@ def main():
 
     # Print sensor status
     print()
-    for sensor in ['oximeter', 'camera', 'csi', 'emg', 'gsr']:
+    for sensor in ['oximeter', 'camera', 'csi', 'emg', 'gsr', 'thermal']:
         info = daemon.registry.get_sensor(sensor)
         if info and info.state == SensorState.DISABLED:
             icon = '⬛'
@@ -317,6 +497,27 @@ def main():
     print(f'  🔴 RECORDING: {sid}')
     print(f'  📁 Output: {daemon.session_dir}')
     print()
+
+    # Operator console: live health board + [a]bort/[p]ause keys (hands-off mode,
+    # e.g. daemon + external task app). Skips the plain status line.
+    if args.console:
+        from src.session.operator_console import OperatorConsole
+        from src.session.runner import SessionControls
+        controls = SessionControls()
+        console = OperatorConsole(daemon, controls,
+                                  min_hz={'oximeter': 20, 'camera': 15})
+        console.start()
+        try:
+            while daemon.recording and not controls.stop.is_set():
+                time.sleep(0.2)
+        except KeyboardInterrupt:
+            controls.abort()
+        console.stop()
+        if daemon.recording:
+            daemon.stop_recording()
+        _print_summary(daemon)
+        daemon.stop_monitoring()
+        return
 
     # Live terminal status — update every second
     start = time.monotonic()
@@ -369,21 +570,25 @@ def main():
         print('\n\n  ⚠️  Interrupted by user')
         daemon.stop_recording()
 
-    # Final summary
+    _print_summary(daemon)
+    daemon.stop_monitoring()
+
+
+def _print_summary(daemon):
+    r = daemon.registry
     print('\n')
     print('=' * 60)
     print('  ✅ Recording Complete!')
     print('=' * 60)
     print(f'  Session  : {daemon.session_id}')
-    print(f'  💓 Oximeter : {daemon.registry.get_counter("oximeter")} samples')
-    print(f'  🎥 Camera   : {daemon.registry.get_counter("camera")} frames')
-    print(f'  📶 CSI      : {daemon.registry.get_counter("csi")} packets')
-    print(f'  ⚡ EMG      : {daemon.registry.get_counter("emg")} packets')
-    print(f'  💧 GSR      : {daemon.registry.get_counter("gsr")} samples')
+    print(f'  💓 Oximeter : {r.get_counter("oximeter")} samples')
+    print(f'  🎥 Camera   : {r.get_counter("camera")} frames')
+    print(f'  📶 CSI      : {r.get_counter("csi")} packets')
+    print(f'  ⚡ EMG      : {r.get_counter("emg")} packets')
+    print(f'  💧 GSR      : {r.get_counter("gsr")} samples')
+    print(f'  🌡️  Thermal  : {r.get_counter("thermal")} frames')
     print(f'  📁 Output   : {daemon.session_dir}')
     print('=' * 60)
-
-    daemon.stop_monitoring()
 
 
 if __name__ == '__main__':
